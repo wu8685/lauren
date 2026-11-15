@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func runAt(t *testing.T, dir string, args ...string) (int, map[string]any, string) {
@@ -485,6 +486,183 @@ func TestConcurrentWrites(t *testing.T) {
 	if len(st.Changes) != 8 {
 		t.Fatalf("并发写入丢失: %d", len(st.Changes))
 	}
+}
+
+func TestCandidateShiftDropsConclusions(t *testing.T) {
+	dir := t.TempDir()
+	project(t, dir, "")
+	gitInit(t, dir)
+	walkToBuild(t, dir)
+	writeFile(t, filepath.Join(dir, "checks", "unit.sh"), "#!/bin/sh\necho x >> app/copy.txt\necho touched >> app/new-note.txt\nexit 0\n")
+	code, m, errb := runAt(t, dir, "check", "--name", "unit")
+	if code != ExitCheck {
+		t.Fatalf("检查改动工作区仍返回 %d %v %s", code, m, errb)
+	}
+	m = must(t, dir, ExitOK, "status")
+	for _, c := range m["checks"].([]any) {
+		cv := c.(map[string]any)
+		if cv["name"] == "unit" && cv["effective_status"] != "stale" {
+			t.Fatalf("检查改动了跟踪文件和未跟踪文件，结果不能给新候选放行: %#v", cv)
+		}
+	}
+	must(t, dir, ExitGate, "change", "advance")
+
+	dir = t.TempDir()
+	project(t, dir, "")
+	gitInit(t, dir)
+	before := fingerprint(dir, "local")
+	writeFile(t, filepath.Join(dir, ".lauren", "runtime", "noise.txt"), "runtime\n")
+	writeFile(t, filepath.Join(dir, "build.out"), "artifact\n")
+	writeFile(t, filepath.Join(dir, ".gitignore"), ".lauren/runtime/\nbuild.out\n")
+	runGit(t, dir, "add", ".gitignore")
+	runGit(t, dir, "-c", "user.email=dev@example.com", "-c", "user.name=dev", "commit", "-m", "ignore build")
+	base := fingerprint(dir, "local")
+	if base.Hash == before.Hash {
+		t.Fatal("提交 gitignore 后指纹应变化")
+	}
+	writeFile(t, filepath.Join(dir, "build.out"), "artifact-2\n")
+	writeFile(t, filepath.Join(dir, ".lauren", "runtime", "noise.txt"), "runtime-2\n")
+	after := fingerprint(dir, "local")
+	if after.Hash != base.Hash {
+		t.Fatalf("忽略文件和 runtime 不应改变源码指纹: %s vs %s", base.Hash, after.Hash)
+	}
+
+	walkToAccept(t, dir)
+	must(t, dir, ExitOK, "change", "accept", "--what", "delivery", "--source", "human", "--reason", "接受", "--scope", "fixture")
+	cfg, err := os.ReadFile(filepath.Join(dir, "lauren.project.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "lauren.project.json"), append(cfg, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m = must(t, dir, ExitOK, "status")
+	if m["facts"].(map[string]any)["delivery_accepted"] != false {
+		t.Fatal("配置变化后不能保留交付接受")
+	}
+	must(t, dir, ExitGate, "change", "advance")
+}
+
+func TestReviseVoidsReleaseFacts(t *testing.T) {
+	dir := t.TempDir()
+	project(t, dir, "")
+	gitInit(t, dir)
+	must(t, dir, ExitOK, "change", "create", "--goal", "发布读回", "--release", "true")
+	for _, step := range [][]string{
+		{"change", "submit", "--artifact", "artifacts/demand.json"},
+		{"change", "advance"},
+		{"change", "submit", "--artifact", "artifacts/plan.json"},
+		{"change", "advance"},
+		{"change", "submit", "--artifact", "artifacts/impl.json"},
+		{"check", "--name", "static"},
+		{"check", "--name", "unit"},
+		{"change", "advance"},
+		{"change", "submit", "--artifact", "artifacts/accept.json"},
+		{"check", "--name", "interact"},
+		{"change", "accept", "--what", "delivery", "--source", "human", "--reason", "接受", "--scope", "fixture"},
+		{"change", "advance"},
+		{"change", "accept", "--what", "release", "--source", "human", "--reason", "声明", "--scope", "fixture"},
+		{"check", "--name", "version"},
+	} {
+		must(t, dir, ExitOK, step...)
+	}
+	m := must(t, dir, ExitOK, "status")
+	facts := m["facts"].(map[string]any)
+	if facts["release_declared"] != true || facts["release_verified"] != true || m["tool_version"] == nil {
+		t.Fatalf("发布事实未分开记下: %#v", m)
+	}
+	must(t, dir, ExitOK, "change", "submit", "--stage", StageDemand, "--artifact", "artifacts/demand.json")
+	m = must(t, dir, ExitOK, "status")
+	facts = m["facts"].(map[string]any)
+	if m["stage"] != StageDemand || facts["delivery_accepted"] != false || facts["release_declared"] != false || facts["release_verified"] != false || m["tool_version"] != nil {
+		t.Fatalf("修正需求后过期结论还在: %#v", m)
+	}
+}
+
+func TestEmptyConfigTimeoutAndBadInput(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{"schema":1,"environment":"local","release":false,"profile":"full","checks":[],"requirements":[]}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "demand.json"), `{"goal":"空选择要失败","acceptance":["关闭"],"baseline":"虚构"}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "plan.json"), `{"approach":"补路径","risks":"漏行为","prechecks":["unit"]}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "impl.json"), `{"summary":"还没有检查"}`)
+	gitInit(t, dir)
+	must(t, dir, ExitOK, "change", "create", "--goal", "空配置")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
+	_, m, errb := runAt(t, dir, "change", "advance")
+	msg := errb
+	if m["error"] != nil {
+		msg = m["error"].(string)
+	}
+	if !strings.Contains(msg, "空检查配置") {
+		t.Fatalf("空配置不应通过自验: %s", msg)
+	}
+
+	dir = t.TempDir()
+	body := `{
+  "schema": 1, "environment": "local", "release": false, "profile": "full",
+  "checks": [{"name": "slow", "layer": "unit", "when": "self", "argv": ["./checks/slow.sh"], "required": true}],
+  "requirements": []
+}`
+	project(t, dir, body)
+	writeFile(t, filepath.Join(dir, "checks", "slow.sh"), "#!/bin/sh\nsleep 5\n")
+	gitInit(t, dir)
+	must(t, dir, ExitOK, "change", "create", "--goal", "超时")
+	old := checkTimeout
+	checkTimeout = 200 * time.Millisecond
+	code, _, _ := runAt(t, dir, "check", "--name", "slow")
+	checkTimeout = old
+	if code != ExitCheck {
+		t.Fatalf("超时退出码=%d", code)
+	}
+	st := must(t, dir, ExitOK, "status")
+	ch := st["checks"].([]any)[0].(map[string]any)
+	if ch["effective_status"] != "fail" {
+		t.Fatalf("超时应记失败: %#v", ch)
+	}
+
+	writeFile(t, filepath.Join(dir, "artifacts", "bad.json"), "not-json")
+	writeFile(t, filepath.Join(dir, "artifacts", "arr.json"), "[]")
+	_, m, errb = runAt(t, dir, "change", "submit", "--artifact", "artifacts/bad.json")
+	msg = errText(m, errb)
+	if !strings.Contains(msg, "JSON") {
+		t.Fatalf("坏 JSON 应拒绝: %s", msg)
+	}
+	_, m, errb = runAt(t, dir, "change", "submit", "--artifact", "artifacts/arr.json")
+	msg = errText(m, errb)
+	if !strings.Contains(msg, "JSON") {
+		t.Fatalf("数组产物应拒绝: %s", msg)
+	}
+	_, m, errb = runAt(t, dir, "change", "submit", "--artifact", "artifacts/../../outside.json")
+	msg = errText(m, errb)
+	if !strings.Contains(msg, "相对路径") {
+		t.Fatalf("嵌套越界应拒绝: %s", msg)
+	}
+}
+
+func errText(m map[string]any, errb string) string {
+	if m["error"] != nil {
+		return m["error"].(string)
+	}
+	return errb
+}
+
+func walkToAccept(t *testing.T, dir string) {
+	t.Helper()
+	must(t, dir, ExitOK, "change", "create", "--goal", "验收", "--release", "false")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
+	must(t, dir, ExitOK, "check", "--name", "static")
+	must(t, dir, ExitOK, "check", "--name", "unit")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/accept.json")
+	must(t, dir, ExitOK, "check", "--name", "interact")
 }
 
 func TestSkillsCheck(t *testing.T) {

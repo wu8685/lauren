@@ -42,6 +42,8 @@ cd examples/shelf   # 演示请先复制到临时目录并 git init，见 run-de
 
 `status` 把阶段、整体状态、检查结果、交付接受、发布声明和工具读回分开显示。没有完成百分比，也没有「已通知」。
 
+当前限制：一个项目同时只能有一个进行中的变更（`active` 或 `blocked`），结束之后才能开下一个。项目目录必须是 git 根。`.lauren/runtime/` 和 git 忽略文件不进入源码指纹，原因见 [docs/v0.1.md](docs/v0.1.md)。检查进程超过 120 秒记为失败。
+
 新项目可以先 `lauren init`。检查命令写进 `lauren.project.json` 的 `argv`，由 `lauren check` 实际执行。这个配置是显式信任的，程序不会把变更目标拼成 shell。
 
 ## 信任边界

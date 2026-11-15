@@ -513,7 +513,7 @@ func (a *app) changeAccept(args []string) int {
 	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
 		ch.Accepts = append(ch.Accepts, Accept{
 			What: *what, Source: *source, Reason: *reason, Scope: *scope,
-			At: time.Now().UTC(), Generation: ch.Generation,
+			At: time.Now().UTC(), Generation: ch.Generation, Fingerprint: fp.Hash,
 		})
 		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "accept", Message: *what + " 来源 " + *source})
 		return ExitOK, a.payload(root, "change accept", ch, proj, fp)
@@ -537,7 +537,7 @@ func (a *app) changeVersion(args []string) int {
 	}
 	root, _ := a.projectRoot()
 	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
-		ch.DeclaredVersion = &VersionFact{Value: *ver, Source: "declaration", At: time.Now().UTC()}
+		ch.DeclaredVersion = &VersionFact{Value: *ver, Source: "declaration", At: time.Now().UTC(), Generation: ch.Generation, Fingerprint: fp.Hash}
 		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "declare-version", Message: *ver})
 		return ExitOK, a.payload(root, "change declare-version", ch, proj, fp)
 	})
@@ -732,6 +732,7 @@ func (a *app) cmdCheck(args []string) int {
 	for _, spec := range specs {
 		runs = append(runs, runCheck(root, spec, fp, gen))
 	}
+	fpAfter := fingerprint(root, proj.Environment)
 	var code = ExitOK
 	err = WithState(root, func(st *State) error {
 		ch, err := pickChange(st, *id, true)
@@ -744,7 +745,7 @@ func (a *app) cmdCheck(args []string) int {
 		for i := range runs {
 			if runs[i].Layer == "release-readback" && runs[i].Status == "pass" {
 				if v := toolVersionFrom(runs[i], root); v != "" {
-					ch.ToolVersion = &VersionFact{Value: v, Source: "tool", At: time.Now().UTC()}
+					ch.ToolVersion = &VersionFact{Value: v, Source: "tool", At: time.Now().UTC(), Generation: ch.Generation, Fingerprint: runs[i].Fingerprint}
 				}
 			}
 			ch.Runs = append(ch.Runs, runs[i])
@@ -752,8 +753,11 @@ func (a *app) cmdCheck(args []string) int {
 				code = ExitCheck
 			}
 		}
+		if fpAfter.Kind != "ok" || fpAfter.Hash != fp.Hash {
+			code = ExitCheck
+		}
 		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "check", Message: fmt.Sprintf("运行 %d 项", len(runs))})
-		view := a.payload(root, "check", ch, proj, fp)
+		view := a.payload(root, "check", ch, proj, fpAfter)
 		view.OK = code == ExitOK
 		if a.json {
 			_ = a.emit(code, view)
@@ -906,7 +910,7 @@ type statusPayload struct {
 func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint) statusPayload {
 	p := statusPayload{
 		OK: true, Command: cmd, ID: ch.ID, Goal: ch.Goal, Stage: ch.Stage, Status: ch.Status,
-		ReleaseIntent: ch.Release, Candidate: fp, DeclaredVersion: ch.DeclaredVersion, ToolVersion: ch.ToolVersion,
+		ReleaseIntent: ch.Release, Candidate: fp, DeclaredVersion: currentVersion(ch.DeclaredVersion, ch.Generation, fp), ToolVersion: currentVersion(ch.ToolVersion, ch.Generation, fp),
 		Next:  nextActions(ch, proj, fp),
 		Trust: "本地状态文件可以被改写。这个 CLI 不认证人类，也不能防止恶意篡改。合并是否可信看仓库 CI 重跑；交付是否接受看来源被明确记下的接受记录。",
 	}
@@ -951,8 +955,8 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 	}
 	p.Facts = &facts{
 		ResultsRecorded:  len(ch.Runs) > 0,
-		DeliveryAccepted: ch.liveAccept("delivery") != nil,
-		ReleaseDeclared:  ch.liveAccept("release") != nil,
+		DeliveryAccepted: ch.liveAccept("delivery", fp) != nil,
+		ReleaseDeclared:  ch.liveAccept("release", fp) != nil,
 		ReleaseVerified:  releaseVerified,
 		ProductVerified:  product,
 	}
@@ -963,6 +967,13 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 		})
 	}
 	return p
+}
+
+func currentVersion(v *VersionFact, gen int, fp Fingerprint) *VersionFact {
+	if v.current(gen, fp) {
+		return v
+	}
+	return nil
 }
 
 func firstName(p Project, when string) string {

@@ -66,15 +66,22 @@ func (c *Change) latestRun(name string) *CheckRun {
 	return found
 }
 
-func (c *Change) liveAccept(what string) *Accept {
+func (c *Change) liveAccept(what string, fp Fingerprint) *Accept {
+	if fp.Kind != "ok" {
+		return nil
+	}
 	var found *Accept
 	for i := range c.Accepts {
 		a := &c.Accepts[i]
-		if a.What == what && !a.Voided && a.Generation == c.Generation {
+		if a.What == what && !a.Voided && a.Generation == c.Generation && a.Fingerprint == fp.Hash {
 			found = a
 		}
 	}
 	return found
+}
+
+func (v *VersionFact) current(gen int, fp Fingerprint) bool {
+	return v != nil && fp.Kind == "ok" && v.Generation == gen && v.Fingerprint == fp.Hash
 }
 
 func (c *Change) voidDownstream() {
@@ -212,6 +219,9 @@ func (c *Change) gate(p Project, fp Fingerprint) (string, []string) {
 		if fp.Kind != "ok" {
 			return "", []string{fp.Note}
 		}
+		if !hasRequiredCheck(p, "self") {
+			return "", []string{"没有配置必过的自验检查。空检查配置不能通过实现与自验"}
+		}
 		bad := c.requiredFresh(p, "self", fp)
 		if len(bad) > 0 {
 			return "", bad
@@ -222,6 +232,9 @@ func (c *Change) gate(p Project, fp Fingerprint) (string, []string) {
 			return "", []string{fp.Note}
 		}
 		var bad []string
+		if !hasRequiredCheck(p, "acceptance") && !hasRequiredRequirement(p) {
+			bad = append(bad, "没有配置必过的验收检查或验收要求。空配置不能通过验收与交付")
+		}
 		bad = append(bad, c.requiredFresh(p, "acceptance", fp)...)
 		for _, req := range p.Requirements {
 			if !req.Required {
@@ -232,7 +245,7 @@ func (c *Change) gate(p Project, fp Fingerprint) (string, []string) {
 				bad = append(bad, why)
 			}
 		}
-		if c.liveAccept("delivery") == nil {
+		if c.liveAccept("delivery", fp) == nil {
 			bad = append(bad, "交付尚未被接受。检查通过不等于交付接受")
 		}
 		if len(bad) > 0 {
@@ -243,8 +256,8 @@ func (c *Change) gate(p Project, fp Fingerprint) (string, []string) {
 		}
 		return StageRetro, nil
 	case StageRelease:
-		if c.liveAccept("release") == nil {
-			return "", []string{"还没有发布声明。声明不是工具读回"}
+		if c.liveAccept("release", fp) == nil {
+			return "", []string{"还没有对当前候选的发布声明。声明不是工具读回，候选变化后要重新声明"}
 		}
 		bad := c.requiredFresh(p, "release", fp)
 		if len(bad) > 0 {
@@ -261,6 +274,24 @@ func (c *Change) gate(p Project, fp Fingerprint) (string, []string) {
 	default:
 		return "", []string{"未知阶段"}
 	}
+}
+
+func hasRequiredCheck(p Project, when string) bool {
+	for _, ch := range p.Checks {
+		if ch.When == when && ch.Required {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRequiredRequirement(p Project) bool {
+	for _, req := range p.Requirements {
+		if req.Required {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Change) verifiedFixed(pb Problem, fp Fingerprint) bool {

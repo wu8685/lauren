@@ -136,19 +136,22 @@ type Problem struct {
 }
 
 type Accept struct {
-	What       string    `json:"what"`
-	Source     string    `json:"source"`
-	Reason     string    `json:"reason"`
-	Scope      string    `json:"scope"`
-	At         time.Time `json:"at"`
-	Voided     bool      `json:"voided"`
-	Generation int       `json:"generation"`
+	What        string    `json:"what"`
+	Source      string    `json:"source"`
+	Reason      string    `json:"reason"`
+	Scope       string    `json:"scope"`
+	At          time.Time `json:"at"`
+	Voided      bool      `json:"voided"`
+	Generation  int       `json:"generation"`
+	Fingerprint string    `json:"fingerprint"`
 }
 
 type VersionFact struct {
-	Value  string    `json:"value"`
-	Source string    `json:"source"`
-	At     time.Time `json:"at"`
+	Value       string    `json:"value"`
+	Source      string    `json:"source"`
+	At          time.Time `json:"at"`
+	Generation  int       `json:"generation"`
+	Fingerprint string    `json:"fingerprint"`
 }
 
 type BlockInfo struct {

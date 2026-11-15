@@ -14,6 +14,9 @@ import (
 var secretRE = regexp.MustCompile(`(?i)(token|secret|password|passwd|api[_-]?key|credential)(\s*[:=]\s*)(\S+)`)
 var bearerRE = regexp.MustCompile(`(?i)bearer\s+[a-z0-9._\-]+`)
 
+// checkTimeout 是单次子进程上限。超时记为 fail，不是 pass。
+var checkTimeout = 120 * time.Second
+
 func redact(s string) string {
 	s = secretRE.ReplaceAllString(s, "${1}${2}[redacted]")
 	s = bearerRE.ReplaceAllString(s, "Bearer [redacted]")
@@ -47,7 +50,7 @@ func runCheck(root string, spec CheckSpec, fp Fingerprint, gen int) CheckRun {
 		run.Ended = time.Now().UTC()
 		return run
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), checkTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, spec.Argv[0], spec.Argv[1:]...)
 	cmd.Dir = root
