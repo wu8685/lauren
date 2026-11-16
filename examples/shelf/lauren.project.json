@@ -6,7 +6,8 @@
     "release_stage": "included",
     "artifact_level": "standard",
     "integration_branch": "main",
-    "promote_threshold": 2
+    "promote_threshold": 2,
+    "check_timeout_seconds": 600
   },
   "checks": [
     {"name": "static", "layer": "static", "gate": "self_verification", "argv": ["./checks/static.sh"], "required": true, "environments": ["development", "integration"]},

@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,8 +15,9 @@ import (
 var secretRE = regexp.MustCompile(`(?i)(token|secret|password|passwd|api[_-]?key|credential)(\s*[:=]\s*)(\S+)`)
 var bearerRE = regexp.MustCompile(`(?i)bearer\s+[a-z0-9._\-]+`)
 
-// checkTimeout 是单次子进程上限。超时记为 fail，不是 pass。
-var checkTimeout = 120 * time.Second
+// checkTimeoutUnit 把配置里的秒数换成实际等待时间。生产环境是一秒。
+// 测试可以改成更短的单位，避免为了覆盖超时真的等满配置的秒数。
+var checkTimeoutUnit = time.Second
 
 func redact(s string) string {
 	s = secretRE.ReplaceAllString(s, "${1}${2}[redacted]")
@@ -23,8 +25,9 @@ func redact(s string) string {
 	return s
 }
 
-func runCheck(root, changeID string, spec CheckSpec, fp Fingerprint, gen int, env, integrationBranch, integrationSHA string) CheckRun {
+func runCheck(root, changeID string, proj Project, spec CheckSpec, fp Fingerprint, gen int, env, integrationBranch, integrationSHA string) CheckRun {
 	now := time.Now().UTC()
+	secs := proj.effectiveTimeoutSeconds(spec)
 	bind := BindWorktree
 	if spec.Layer == "release_readback" || spec.Gate == GateRelease {
 		bind = BindIntegration
@@ -33,7 +36,7 @@ func runCheck(root, changeID string, spec CheckSpec, fp Fingerprint, gen int, en
 		ID: newID("r-"), Name: spec.Name, Layer: spec.Layer, Gate: spec.Gate,
 		Argv: append([]string{}, spec.Argv...), Cwd: root, Environment: env,
 		Started: now, Ended: now, EvidenceGeneration: gen, BindKind: bind,
-		Status: "blocked", CandidateKind: fp.Kind,
+		Status: "blocked", CandidateKind: fp.Kind, TimeoutSeconds: secs,
 	}
 	if bind == BindWorktree {
 		run.Fingerprint = fp.Hash
@@ -58,9 +61,10 @@ func runCheck(root, changeID string, spec CheckSpec, fp Fingerprint, gen int, en
 		run.Ended = time.Now().UTC()
 		return run
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), checkTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(secs)*checkTimeoutUnit)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, spec.Argv[0], spec.Argv[1:]...)
+	configureCheckProcess(cmd)
 	cmd.Dir = root
 	if strings.Contains(spec.Argv[0], "/") && !filepath.IsAbs(spec.Argv[0]) {
 		cmd.Path = filepath.Join(root, spec.Argv[0])
@@ -70,7 +74,7 @@ func runCheck(root, changeID string, spec CheckSpec, fp Fingerprint, gen int, en
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	err := cmd.Run()
-	raw := redact(buf.String())
+	raw := fmt.Sprintf("timeout_seconds=%d\n%s", secs, redact(buf.String()))
 	if len(raw) > 1<<20 {
 		raw = raw[:1<<20] + "\n[truncated]\n"
 	}
@@ -84,7 +88,7 @@ func runCheck(root, changeID string, spec CheckSpec, fp Fingerprint, gen int, en
 	run.Ended = time.Now().UTC()
 	if ctx.Err() == context.DeadlineExceeded {
 		run.Status = "fail"
-		run.Note = "检查超时"
+		run.Note = fmt.Sprintf("检查超时（%d秒）", secs)
 		return run
 	}
 	if err == nil {

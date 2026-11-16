@@ -18,7 +18,7 @@ func (c *Change) syncCatalog(proj Project) {
 	if c.CatalogHash != h {
 		c.CatalogHash = h
 		c.invalidateEvidence()
-		c.History = append(c.History, Event{At: time.Now().UTC(), Kind: "catalog", Message: "checks 或 requirements 变了，已有证据作废"})
+		c.History = append(c.History, Event{At: time.Now().UTC(), Kind: "catalog", Message: "checks、requirements 或检查超时变了，已有证据作废"})
 	}
 }
 

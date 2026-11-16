@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -460,22 +462,23 @@ func TestTimeoutBlockCancel(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{
 	  "schema": 1,
 	  "environments": ["development", "integration", "staging", "production"],
-	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main"},
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main", "check_timeout_seconds": 1},
 	  "checks": [{"name": "slow", "layer": "unit", "gate": "self_verification", "argv": ["./checks/slow.sh"], "required": true}],
 	  "requirements": []
 	}`)
 	writeFile(t, filepath.Join(dir, "checks", "slow.sh"), "#!/bin/sh\nsleep 5\n")
 	gitInit(t, dir)
 	must(t, dir, ExitOK, "change", "create", "--goal", "超时")
-	old := checkTimeout
-	checkTimeout = 200 * time.Millisecond
+	old := checkTimeoutUnit
+	checkTimeoutUnit = 200 * time.Millisecond
+	t.Cleanup(func() { checkTimeoutUnit = old })
 	code, _, _ := runAt(t, dir, "check", "--name", "slow")
-	checkTimeout = old
 	if code != ExitCheck {
 		t.Fatalf("超时退出码=%d", code)
 	}
-	if must(t, dir, ExitOK, "status")["checks"].([]any)[0].(map[string]any)["effective_status"] != "fail" {
-		t.Fatal("超时应记失败")
+	slow := must(t, dir, ExitOK, "status")["checks"].([]any)[0].(map[string]any)
+	if slow["effective_status"] != "fail" || slow["timeout_seconds"].(float64) != 1 {
+		t.Fatalf("超时应记失败并带上有效超时: %#v", slow)
 	}
 	must(t, dir, ExitOK, "change", "block", "--reason", "等")
 	must(t, dir, ExitBlocked, "check")
@@ -684,4 +687,198 @@ func TestSkillsCheck(t *testing.T) {
 	if code != ExitOK {
 		t.Fatalf("skills check: %d %s", code, errb)
 	}
+}
+
+func namedCheck(t *testing.T, m map[string]any, name string) map[string]any {
+	t.Helper()
+	for _, c := range m["checks"].([]any) {
+		cm := c.(map[string]any)
+		if cm["name"] == name {
+			return cm
+		}
+	}
+	t.Fatalf("没有检查 %s", name)
+	return nil
+}
+
+func writeTimeoutProject(t *testing.T, dir, extraDefaults, checks string) {
+	t.Helper()
+	if extraDefaults != "" {
+		extraDefaults = ", " + extraDefaults
+	}
+	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{
+	  "schema": 1,
+	  "environments": ["development", "integration", "staging", "production"],
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main"`+extraDefaults+`},
+	  "checks": `+checks+`,
+	  "requirements": []
+	}`)
+}
+
+func TestCheckTimeout(t *testing.T) {
+	okCheck := `[{"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/ok.sh"], "required": true}]`
+
+	t.Run("initAndMissingFieldUse600", func(t *testing.T) {
+		dir := t.TempDir()
+		must(t, dir, ExitOK, "init", "--integration-branch", "main")
+		proj, err := loadProject(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if proj.Defaults.CheckTimeoutSeconds != 600 || proj.projectTimeoutSeconds() != 600 {
+			t.Fatalf("init 应写入 600 秒: %+v", proj.Defaults)
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, "lauren.project.json"))
+		if err != nil || !strings.Contains(string(raw), `"check_timeout_seconds": 600`) {
+			t.Fatalf("init 文件没有写出超时: %s", raw)
+		}
+
+		dir = t.TempDir()
+		writeTimeoutProject(t, dir, "", okCheck)
+		writeFile(t, filepath.Join(dir, "checks", "ok.sh"), "#!/bin/sh\nexit 0\n")
+		gitInit(t, dir)
+		must(t, dir, ExitOK, "change", "create", "--goal", "缺省超时")
+		m := must(t, dir, ExitOK, "check", "--name", "unit")
+		got := namedCheck(t, m, "unit")
+		if got["timeout_seconds"].(float64) != 600 || got["effective_status"] != "pass" {
+			t.Fatalf("缺字段应使用 600 秒并通过: %#v", got)
+		}
+		log, err := os.ReadFile(got["log_path"].(string))
+		if err != nil || !strings.Contains(string(log), "timeout_seconds=600") {
+			t.Fatalf("日志应记下有效超时: %s %v", log, err)
+		}
+	})
+
+	t.Run("priorityAndZero", func(t *testing.T) {
+		dir := t.TempDir()
+		writeTimeoutProject(t, dir, `"check_timeout_seconds": 30`, `[
+		  {"name": "plain", "layer": "unit", "gate": "self_verification", "argv": ["./checks/ok.sh"], "required": true},
+		  {"name": "custom", "layer": "unit", "gate": "self_verification", "argv": ["./checks/ok.sh"], "required": true, "timeout_seconds": 10},
+		  {"name": "inherit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/ok.sh"], "required": true, "timeout_seconds": 0}
+		]`)
+		writeFile(t, filepath.Join(dir, "checks", "ok.sh"), "#!/bin/sh\nexit 0\n")
+		gitInit(t, dir)
+		proj, err := loadProject(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if proj.effectiveTimeoutSeconds(proj.Checks[0]) != 30 || proj.effectiveTimeoutSeconds(proj.Checks[1]) != 10 || proj.effectiveTimeoutSeconds(proj.Checks[2]) != 30 {
+			t.Fatalf("优先级不对: %+v", proj.Checks)
+		}
+		must(t, dir, ExitOK, "change", "create", "--goal", "优先级")
+		m := must(t, dir, ExitOK, "check")
+		if namedCheck(t, m, "plain")["timeout_seconds"].(float64) != 30 || namedCheck(t, m, "custom")["timeout_seconds"].(float64) != 10 || namedCheck(t, m, "inherit")["timeout_seconds"].(float64) != 30 {
+			t.Fatalf("执行结果没有带上有效超时: %#v", m["checks"])
+		}
+
+		zero := t.TempDir()
+		writeTimeoutProject(t, zero, `"check_timeout_seconds": 0`, okCheck)
+		writeFile(t, filepath.Join(zero, "checks", "ok.sh"), "#!/bin/sh\nexit 0\n")
+		gitInit(t, zero)
+		must(t, zero, ExitOK, "change", "create", "--goal", "零")
+		m = must(t, zero, ExitOK, "check", "--name", "unit")
+		if namedCheck(t, m, "unit")["timeout_seconds"].(float64) != 600 {
+			t.Fatalf("0 应沿用内置 600 秒: %#v", m["checks"])
+		}
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		cases := []struct {
+			extra  string
+			checks string
+			want   string
+		}{
+			{`"check_timeout_seconds": -1`, `[]`, "不能为负"},
+			{`"check_timeout_seconds": 9223372037`, `[]`, "时间无法表示"},
+			{`"check_timeout_seconds": "600"`, `[]`, "无法解析"},
+			{`"check_timeout_seconds": 1.5`, `[]`, "无法解析"},
+			{`"check_timeout_seconds": 9223372036854775808`, `[]`, "无法解析"},
+			{"", `[{"name":"unit","layer":"unit","gate":"self_verification","argv":["./checks/ok.sh"],"required":true,"timeout_seconds":-2}]`, "不能为负"},
+			{"", `[{"name":"unit","layer":"unit","gate":"self_verification","argv":["./checks/ok.sh"],"required":true,"timeout_seconds":true}]`, "无法解析"},
+		}
+		for _, tc := range cases {
+			dir := t.TempDir()
+			writeTimeoutProject(t, dir, tc.extra, tc.checks)
+			_, m, errb := runAt(t, dir, "status")
+			if !strings.Contains(errText(m, errb), tc.want) {
+				t.Fatalf("配置 %s checks %s: %s", tc.extra, tc.checks, errText(m, errb))
+			}
+		}
+	})
+
+	t.Run("timeoutKillsProcessGroup", func(t *testing.T) {
+		dir := t.TempDir()
+		pidPath := filepath.Join(t.TempDir(), "child.pid")
+		writeTimeoutProject(t, dir, `"check_timeout_seconds": 1`, `[{"name":"slow","layer":"unit","gate":"self_verification","argv":["./checks/slow.sh","`+pidPath+`"],"required":true}]`)
+		writeFile(t, filepath.Join(dir, "checks", "slow.sh"), "#!/bin/sh\nsleep 30 &\necho $! > \"$1\"\nwait\n")
+		gitInit(t, dir)
+		must(t, dir, ExitOK, "change", "create", "--goal", "清理")
+		old := checkTimeoutUnit
+		checkTimeoutUnit = 300 * time.Millisecond
+		t.Cleanup(func() { checkTimeoutUnit = old })
+		start := time.Now()
+		code, m, errb := runAt(t, dir, "check", "--name", "slow")
+		elapsed := time.Since(start)
+		if code != ExitCheck {
+			t.Fatalf("短超时应该失败: %d %s", code, errText(m, errb))
+		}
+		if elapsed > 2*time.Second {
+			t.Fatalf("超时后没有及时返回: %s", elapsed)
+		}
+		got := namedCheck(t, m, "slow")
+		if got["effective_status"] != "fail" || got["timeout_seconds"].(float64) != 1 || !strings.Contains(got["note"].(string), "检查超时（1秒）") {
+			t.Fatalf("超时记录不对: %#v", got)
+		}
+		raw, err := os.ReadFile(pidPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Kill(pid, 0); err == nil {
+			t.Fatalf("超时后子进程 %d 仍在", pid)
+		}
+	})
+
+	t.Run("changingTimeoutStalesPass", func(t *testing.T) {
+		dir := t.TempDir()
+		writeTimeoutProject(t, dir, "", okCheck)
+		writeFile(t, filepath.Join(dir, "checks", "ok.sh"), "#!/bin/sh\nexit 0\n")
+		gitInit(t, dir)
+		must(t, dir, ExitOK, "change", "create", "--goal", "作废")
+		if namedCheck(t, must(t, dir, ExitOK, "check", "--name", "unit"), "unit")["effective_status"] != "pass" {
+			t.Fatal("第一次应通过")
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, "lauren.project.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := strings.Replace(string(raw), `"integration_branch": "main"`, `"integration_branch": "main", "check_timeout_seconds": 90`, 1)
+		if err := os.WriteFile(filepath.Join(dir, "lauren.project.json"), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if namedCheck(t, must(t, dir, ExitOK, "status"), "unit")["effective_status"] != "stale" {
+			t.Fatal("改项目默认超时后，旧的通过不能继续有效")
+		}
+
+		dir = t.TempDir()
+		writeTimeoutProject(t, dir, `"check_timeout_seconds": 30`, okCheck)
+		writeFile(t, filepath.Join(dir, "checks", "ok.sh"), "#!/bin/sh\nexit 0\n")
+		gitInit(t, dir)
+		must(t, dir, ExitOK, "change", "create", "--goal", "单项作废")
+		must(t, dir, ExitOK, "check", "--name", "unit")
+		raw, err = os.ReadFile(filepath.Join(dir, "lauren.project.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text = strings.Replace(string(raw), `"required": true`, `"required": true, "timeout_seconds": 15`, 1)
+		if err := os.WriteFile(filepath.Join(dir, "lauren.project.json"), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if namedCheck(t, must(t, dir, ExitOK, "status"), "unit")["effective_status"] != "stale" {
+			t.Fatal("改单项超时后，旧的通过不能继续有效")
+		}
+	})
 }

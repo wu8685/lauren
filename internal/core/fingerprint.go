@@ -80,9 +80,14 @@ func fingerprint(root string, proj Project) Fingerprint {
 
 func catalogBytes(proj Project) []byte {
 	payload := struct {
-		Checks       []CheckSpec   `json:"checks"`
-		Requirements []Requirement `json:"requirements"`
-	}{Checks: proj.Checks, Requirements: proj.Requirements}
+		CheckTimeoutSeconds int64         `json:"check_timeout_seconds"`
+		Checks              []CheckSpec   `json:"checks"`
+		Requirements        []Requirement `json:"requirements"`
+	}{
+		CheckTimeoutSeconds: proj.projectTimeoutSeconds(),
+		Checks:              proj.Checks,
+		Requirements:        proj.Requirements,
+	}
 	b, _ := json.Marshal(payload)
 	return b
 }

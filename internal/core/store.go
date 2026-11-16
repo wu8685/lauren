@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func runtimeDir(root string) string {
@@ -282,6 +284,35 @@ func (p Project) promoteThreshold() int {
 	return p.Defaults.PromoteThreshold
 }
 
+const defaultCheckTimeoutSeconds int64 = 600
+
+// maxCheckTimeoutSeconds 是 time.Duration 能表示的最大整秒。再大就会在换算时溢出。
+var maxCheckTimeoutSeconds = int64(math.MaxInt64 / int64(time.Second))
+
+func (p Project) projectTimeoutSeconds() int64 {
+	if p.Defaults.CheckTimeoutSeconds <= 0 {
+		return defaultCheckTimeoutSeconds
+	}
+	return p.Defaults.CheckTimeoutSeconds
+}
+
+func (p Project) effectiveTimeoutSeconds(spec CheckSpec) int64 {
+	if spec.TimeoutSeconds > 0 {
+		return spec.TimeoutSeconds
+	}
+	return p.projectTimeoutSeconds()
+}
+
+func validateTimeoutSeconds(field string, seconds int64) error {
+	if seconds < 0 {
+		return fmt.Errorf("%s 不能为负", field)
+	}
+	if seconds > maxCheckTimeoutSeconds {
+		return fmt.Errorf("%s 超过 %d 秒，时间无法表示", field, maxCheckTimeoutSeconds)
+	}
+	return nil
+}
+
 func (p Project) validate() error {
 	if len(p.Environments) == 0 {
 		return fmt.Errorf("项目配置缺少 environments")
@@ -302,6 +333,9 @@ func (p Project) validate() error {
 	if d.PromoteThreshold < 0 {
 		return fmt.Errorf("defaults.promote_threshold 不能为负")
 	}
+	if err := validateTimeoutSeconds("defaults.check_timeout_seconds", d.CheckTimeoutSeconds); err != nil {
+		return err
+	}
 	for _, ch := range p.Checks {
 		switch ch.Gate {
 		case GateSelf, GateAcceptance, GateRelease:
@@ -315,6 +349,9 @@ func (p Project) validate() error {
 			if !containsStr(p.Environments, env) {
 				return fmt.Errorf("检查 %s 的环境 %s 不在项目 environments 里", ch.Name, env)
 			}
+		}
+		if err := validateTimeoutSeconds(fmt.Sprintf("检查 %s 的 timeout_seconds", ch.Name), ch.TimeoutSeconds); err != nil {
+			return err
 		}
 	}
 	return nil
