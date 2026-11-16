@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "environments": ["development", "integration", "staging", "production"],
+  "defaults": {
+    "environment": "development",
+    "release_stage": "included",
+    "artifact_level": "standard",
+    "integration_branch": "main"
+  },
+  "checks": [
+    {"name": "static", "layer": "static", "gate": "self_verification", "argv": ["./checks/static.sh"], "required": true, "environments": ["development", "integration"]},
+    {"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/unit.sh"], "required": true, "environments": ["development", "integration"]},
+    {"name": "interact", "layer": "interaction", "gate": "acceptance", "argv": ["./checks/interact.sh"], "required": true, "environments": ["integration", "staging"]},
+    {"name": "version", "layer": "release_readback", "gate": "release", "argv": ["./checks/read-version.sh"], "required": true, "environments": ["staging", "production"]}
+  ],
+  "requirements": [
+    {"id": "copy", "claim": "文案含空列表说明", "min_layer": "static", "required": true, "check": "static"},
+    {"id": "paths", "claim": "关闭、空选择和失败路径有结果", "min_layer": "unit", "required": true, "check": "unit"},
+    {"id": "click", "claim": "保存动作有交互记录", "min_layer": "interaction", "required": true, "check": "interact", "independent": true}
+  ]
+}
