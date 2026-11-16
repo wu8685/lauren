@@ -58,17 +58,19 @@ PY
 "$BIN" check --name interact --environment integration
 "$BIN" change accept --what delivery --source human --reason "再次看过失败路径" --scope "shelf 示例"
 "$BIN" change advance
-"$BIN" change problem add --title "空选择静默成功" --layer unit --symptom "未传选择" --target-check empty-selection --disposition later --reason "第二次，晋升为检查" --scope project
+"$BIN" change problem add --title "空选择静默成功" --layer unit --symptom "未传选择" --target-check unit --disposition later --reason "第二次，登记到已有的 unit 检查" --scope project
 python3 - "$TMP" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 files = list((root / ".lauren" / "problems").glob("*.json"))
 assert len(files) == 1, files
 pb = json.loads(files[0].read_text())
-assert pb["count"] == 2 and pb["status"] == "promoted" and pb["promoted_check"] == "empty-selection", pb
+assert pb["count"] == 2 and pb["status"] == "promoted" and pb["promoted_check"] == "unit", pb
 assert pb["verified_fixed"] is False
 proj = json.loads((root / "lauren.project.json").read_text())
-assert any(c["name"] == "empty-selection" for c in proj["checks"])
+assert [c["name"] for c in proj["checks"]] == ["static", "unit", "interact", "version"]
+assert any(r["check"] == "unit" and r["claim"] == "空选择静默成功" for r in proj["requirements"])
+assert not (root / "checks" / "promoted").exists()
 PY
 "$BIN" change submit --artifact artifacts/retro.json
 "$BIN" change advance

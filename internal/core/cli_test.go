@@ -558,8 +558,11 @@ func TestProblemLibrary(t *testing.T) {
 	}
 	m = must(t, dir, ExitOK, append(add, "--note", "第二次")...)
 	pb = m["problems"].([]any)[0].(map[string]any)
-	if pb["count"].(float64) != 2 || pb["status"] != "promoted" || pb["promoted_check"] != "unit" {
-		t.Fatalf("两次应晋升到已有检查: %#v", pb)
+	if pb["count"].(float64) != 2 || pb["status"] != "promoted" || pb["promoted_check"] != "unit" || pb["disposition"] != "" || pb["verified_fixed"] != false {
+		t.Fatalf("两次应晋升到已有检查，且不沿用旧处置: %#v", pb)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "checks", "promoted")); !os.IsNotExist(err) {
+		t.Fatal("晋升不应生成占位脚本")
 	}
 	entries, err := os.ReadDir(filepath.Join(dir, ".lauren", "problems"))
 	if err != nil {
@@ -617,6 +620,61 @@ func TestProblemLibrary(t *testing.T) {
 	pb = m["problems"].([]any)[0].(map[string]any)
 	if pb["count"].(float64) != 2 || pb["status"] == "promoted" {
 		t.Fatalf("阈值 3 时两次不应晋升: %#v", pb)
+	}
+}
+
+func TestLaterCannotSkipPromotion(t *testing.T) {
+	dir := t.TempDir()
+	project(t, dir, ReleaseExcluded)
+	gitInit(t, dir)
+	must(t, dir, ExitOK, "change", "create", "--goal", "未登记")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
+	must(t, dir, ExitOK, "check", "--name", "static")
+	must(t, dir, ExitOK, "check", "--name", "unit")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/accept.json")
+	must(t, dir, ExitOK, "check", "--name", "interact", "--environment", "integration")
+	must(t, dir, ExitOK, "change", "accept", "--what", "delivery", "--source", "human", "--reason", "接受", "--scope", "fixture")
+	must(t, dir, ExitOK, "change", "advance")
+	add := []string{"change", "problem", "add", "--title", "需要登记", "--layer", "interaction", "--symptom", "点保存没记录"}
+	must(t, dir, ExitOK, add...)
+	must(t, dir, ExitOK, append(add, "--note", "第二次", "--disposition", "later", "--reason", "想跳过")...)
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/retro.json")
+	_, m, errb := runAt(t, dir, "change", "advance")
+	if !strings.Contains(errText(m, errb), "还没登记") {
+		t.Fatalf("later 不能跳过未完成的晋升: %s", errText(m, errb))
+	}
+	_, m, errb = runAt(t, dir, append(add, "--target-check", "unit", "--note", "层次不够")...)
+	if !strings.Contains(errText(m, errb), "低于问题层次") {
+		t.Fatalf("更弱的 target-check 不能晋升: %s", errText(m, errb))
+	}
+	libs, err := loadLibrary(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pb := range libs {
+		pb.Status = "rejected"
+		pb.Disposition = "rejected"
+		pb.Reason = "不采纳"
+		if err := saveLibraryProblem(dir, pb); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id := must(t, dir, ExitOK, "status")["id"].(string)
+	err = WithChange(dir, id, func(ch *Change) error {
+		ch.Problems = append(ch.Problems, Problem{ID: "legacy", Summary: "旧运行时问题"})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, m, errb = runAt(t, dir, "change", "advance")
+	if !strings.Contains(errText(m, errb), "未写入公共库") {
+		t.Fatalf("旧的变更内问题仍应挡住关闭: %s", errText(m, errb))
 	}
 }
 

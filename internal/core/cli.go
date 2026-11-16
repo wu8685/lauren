@@ -362,6 +362,11 @@ func (a *app) changeAdvance(args []string) int {
 	}
 	root, _ := a.projectRoot()
 	return a.withChange(id.id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
+		if ch.Stage == StageRetro {
+			if _, err := promoteDue(root, &proj, ch); err != nil {
+				return a.fail(ExitGate, err.Error()), nil
+			}
+		}
 		libs, lerr := loadLibrary(root)
 		if lerr != nil {
 			return a.fail(ExitInternal, lerr.Error()), nil

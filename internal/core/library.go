@@ -130,6 +130,16 @@ func recordProblem(root string, proj *Project, ch *Change, in problemInput, prom
 		pb = &LibraryProblem{
 			ID: newID("p-"), Title: normKey(in.Title), Status: "open", Layer: normKey(in.Layer), Symptom: normKey(in.Symptom), Scope: in.Scope,
 		}
+	} else {
+		// 新的一次出现不沿用上一轮的处置或已验证结论。
+		pb.Disposition = ""
+		pb.Reason = ""
+		pb.VerifiedFixed = false
+		pb.FailRun = ""
+		pb.PassRun = ""
+		if pb.Status != "promoted" {
+			pb.Status = "open"
+		}
 	}
 	fill := func(dst *string, src string) {
 		if strings.TrimSpace(src) != "" {
@@ -146,14 +156,14 @@ func recordProblem(root string, proj *Project, ch *Change, in problemInput, prom
 	if in.Disposition != "" {
 		pb.Disposition = in.Disposition
 		pb.Reason = in.Reason
-		if in.Disposition == "rejected" {
+		if in.Disposition == "rejected" && pb.Status != "promoted" {
 			pb.Status = "rejected"
 		}
 	}
 	pb.Occurrences = append(pb.Occurrences, Occurrence{At: now, ChangeID: ch.ID, Environment: ch.Policy.Environment, Note: in.Note})
 	pb.Count = len(pb.Occurrences)
 	promoted := false
-	if promote && pb.Status == "open" && pb.Disposition != "rejected" && pb.Count >= proj.promoteThreshold() {
+	if promote && pb.Status == "open" && pb.Disposition != "rejected" && pb.Count >= proj.promoteThreshold() && pb.TargetCheck != "" {
 		if err := promoteIntoProject(root, proj, pb); err != nil {
 			return nil, false, err
 		}
@@ -165,34 +175,30 @@ func recordProblem(root string, proj *Project, ch *Change, in problemInput, prom
 	return pb, promoted, nil
 }
 
-func promoteIntoProject(root string, proj *Project, pb *LibraryProblem) error {
-	layer, gate := mapProblemLayer(pb.Layer)
-	name := pb.TargetCheck
-	if name == "" {
-		name = "promoted-" + pb.ID
+func validCheckName(name string) bool {
+	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "..") || strings.Contains(name, " ") {
+		return false
 	}
-	if findCheck(*proj, name) == nil {
-		envs := []string{"development", "integration"}
-		if gate == GateAcceptance {
-			envs = []string{"integration", "staging"}
+	for _, r := range name {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return false
 		}
-		if gate == GateRelease {
-			envs = []string{"staging", "production"}
-		}
-		proj.Checks = append(proj.Checks, CheckSpec{
-			Name: name, Layer: layer, Gate: gate, Argv: []string{"./checks/promoted/" + name + ".sh"},
-			Required: true, Environments: envs,
-		})
-		script := filepath.Join(root, "checks", "promoted", name+".sh")
-		if _, err := os.Stat(script); errors.Is(err, os.ErrNotExist) {
-			body := "#!/bin/sh\necho \"promoted from " + pb.ID + "\"\nexit 1\n"
-			if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
-				return err
-			}
-			if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-				return err
-			}
-		}
+	}
+	return true
+}
+
+func promoteIntoProject(root string, proj *Project, pb *LibraryProblem) error {
+	name := pb.TargetCheck
+	if !validCheckName(name) {
+		return fmt.Errorf("达到晋升阈值时必须给出已有检查的 target-check，名称只能包含字母、数字、减号和下划线")
+	}
+	spec := findCheck(*proj, name)
+	if spec == nil {
+		return fmt.Errorf("target-check %s 不是项目里已有的检查，不会生成占位脚本", name)
+	}
+	wantLayer, _ := mapProblemLayer(pb.Layer)
+	if layerRank[spec.Layer] < layerRank[wantLayer] {
+		return fmt.Errorf("检查 %s 的层次 %s 低于问题层次 %s", name, spec.Layer, wantLayer)
 	}
 	claim := pb.Title
 	exists := false
@@ -203,12 +209,13 @@ func promoteIntoProject(root string, proj *Project, pb *LibraryProblem) error {
 		}
 	}
 	if !exists {
+		_, gate := mapProblemLayer(pb.Layer)
 		proj.Requirements = append(proj.Requirements, Requirement{
-			ID: "req-" + pb.ID, Claim: claim, MinLayer: layer, Required: true, Check: name, Independent: gate == GateAcceptance,
+			ID: "req-" + pb.ID, Claim: claim, MinLayer: wantLayer, Required: true, Check: name, Independent: gate == GateAcceptance,
 		})
-	}
-	if err := writeAtomicJSON(filepath.Join(root, "lauren.project.json"), proj); err != nil {
-		return err
+		if err := writeAtomicJSON(filepath.Join(root, "lauren.project.json"), proj); err != nil {
+			return err
+		}
 	}
 	pb.Status = "promoted"
 	pb.PromotedCheck = name
@@ -239,6 +246,34 @@ func mapProblemLayer(layer string) (string, string) {
 		}
 		return "static", GateSelf
 	}
+}
+
+func promoteDue(root string, proj *Project, ch *Change) (bool, error) {
+	libs, err := loadLibrary(root)
+	if err != nil {
+		return false, err
+	}
+	changed := false
+	for _, pb := range libs {
+		if pb == nil || !pb.seenIn(ch.ID) || pb.Status != "open" || pb.Disposition == "rejected" {
+			continue
+		}
+		if pb.Count < proj.promoteThreshold() || pb.TargetCheck == "" {
+			continue
+		}
+		if err := promoteIntoProject(root, proj, pb); err != nil {
+			return changed, err
+		}
+		if err := saveLibraryProblem(root, pb); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+	if changed {
+		ch.invalidateEvidence()
+		ch.CatalogHash = catalogHash(*proj)
+	}
+	return changed, nil
 }
 
 func libsFor(root string, ch *Change) []*LibraryProblem {

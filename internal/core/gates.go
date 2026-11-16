@@ -316,8 +316,16 @@ func (c *Change) gate(p Project, fp Fingerprint, libs []*LibraryProblem) (string
 			if pb == nil || !pb.seenIn(c.ID) {
 				continue
 			}
+			if pb.Count >= p.promoteThreshold() && pb.Status != "promoted" && pb.Disposition != "rejected" {
+				bad = append(bad, "问题 "+pb.ID+" 已达到晋升阈值但还没登记到已有检查。later 不能跳过；可以指定 target-check，或把处置写成 rejected")
+			}
 			if pb.Disposition == "" || strings.TrimSpace(pb.Reason) == "" {
 				bad = append(bad, "问题 "+pb.ID+" 还没有处置去向和理由")
+			}
+		}
+		for _, pb := range c.Problems {
+			if pb.Disposition == "" || strings.TrimSpace(pb.Reason) == "" {
+				bad = append(bad, "变更里还有未写入公共库的问题 "+pb.ID+"，还没有处置")
 			}
 		}
 		if len(bad) > 0 {
