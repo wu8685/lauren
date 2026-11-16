@@ -62,7 +62,11 @@ func (a *app) projectRoot() (string, error) {
 		if _, err := os.Stat(filepath.Join(a.root, "lauren.project.json")); err != nil {
 			return "", err
 		}
-		return a.root, nil
+		abs, err := filepath.Abs(a.root)
+		if err != nil {
+			return "", err
+		}
+		return abs, nil
 	}
 	wd, err := os.Getwd()
 	if err != nil {
@@ -92,9 +96,10 @@ func (a *app) fail(code int, msg string) int {
 func (a *app) cmdInit(args []string) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(a.err)
-	env := fs.String("environment", "local", "声明环境")
-	release := fs.Bool("release", false, "这次项目默认要发布")
-	profile := fs.String("profile", "full", "full 或 small")
+	env := fs.String("environment", "development", "defaults.environment")
+	release := fs.String("release-stage", ReleaseExcluded, "included 或 excluded")
+	level := fs.String("artifact-level", LevelStandard, "standard 或 abbreviated")
+	branch := fs.String("integration-branch", "", "项目默认集成分支")
 	dir := fs.String("dir", "", "要初始化的目录")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
@@ -111,14 +116,24 @@ func (a *app) cmdInit(args []string) int {
 			root = wd
 		}
 	}
+	if strings.TrimSpace(*branch) == "" {
+		return a.fail(ExitUsage, "init 需要 --integration-branch。引擎不写死分支名")
+	}
 	path := filepath.Join(root, "lauren.project.json")
 	if _, err := os.Stat(path); err == nil {
 		return a.fail(ExitUsage, "lauren.project.json 已存在")
 	}
-	if *profile != "full" && *profile != "small" {
-		return a.fail(ExitUsage, "profile 只能是 full 或 small")
+	p := Project{
+		Schema:       1,
+		Environments: []string{"development", "integration", "staging", "production"},
+		Defaults: Defaults{
+			Environment: *env, ReleaseStage: *release, ArtifactLevel: *level, IntegrationBranch: *branch,
+		},
+		Checks: []CheckSpec{}, Requirements: []Requirement{},
 	}
-	p := Project{Schema: 1, Environment: *env, Release: *release, Profile: *profile, Checks: []CheckSpec{}, Requirements: []Requirement{}}
+	if err := p.validate(); err != nil {
+		return a.fail(ExitUsage, err.Error())
+	}
 	b, _ := json.MarshalIndent(p, "", "  ")
 	if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
 		return a.fail(ExitInternal, err.Error())
@@ -128,7 +143,7 @@ func (a *app) cmdInit(args []string) int {
 	if a.json {
 		return a.emit(ExitOK, map[string]any{"ok": true, "command": "init", "config": path, "runtime": runtimeDir(root)})
 	}
-	fmt.Fprintf(a.out, "已写入 %s\n运行状态目录 %s\n项目命令写在配置里之后才会被执行。配置属于显式信任，不会从任务文本拼 shell。\n", path, runtimeDir(root))
+	fmt.Fprintf(a.out, "已写入 %s\n运行状态在 %s，按变更分目录，不进 git。\n", path, runtimeDir(root))
 	return ExitOK
 }
 
@@ -158,7 +173,7 @@ func ensureGitignore(root string) error {
 
 func (a *app) cmdChange(args []string) int {
 	if len(args) == 0 {
-		return a.fail(ExitUsage, "用法：lauren change create|submit|advance|rollback|block|resume|cancel|accept|declare-version|problem")
+		return a.fail(ExitUsage, "用法：lauren change create|submit|advance|rollback|block|resume|cancel|accept|declare-version|policy|integration|release|problem")
 	}
 	switch args[0] {
 	case "create":
@@ -179,6 +194,12 @@ func (a *app) cmdChange(args []string) int {
 		return a.changeAccept(args[1:])
 	case "declare-version":
 		return a.changeVersion(args[1:])
+	case "policy":
+		return a.changePolicy(args[1:])
+	case "integration":
+		return a.changeIntegration(args[1:])
+	case "release":
+		return a.changeRelease(args[1:])
 	case "problem":
 		return a.changeProblem(args[1:])
 	case "stage", "pass":
@@ -186,10 +207,6 @@ func (a *app) cmdChange(args []string) int {
 	default:
 		return a.fail(ExitUsage, "未知 change 子命令 "+args[0])
 	}
-}
-
-type changeFlags struct {
-	id string
 }
 
 func (a *app) withChange(id string, fn func(*Change, Project, Fingerprint) (int, any)) int {
@@ -201,14 +218,15 @@ func (a *app) withChange(id string, fn func(*Change, Project, Fingerprint) (int,
 	if err != nil {
 		return a.fail(ExitUsage, err.Error())
 	}
+	id, err = resolveChangeID(root, id, true)
+	if err != nil {
+		return a.fail(ExitUsage, err.Error())
+	}
+	fp := fingerprint(root, proj)
 	var code int
 	var payload any
-	err = WithState(root, func(st *State) error {
-		ch, err := pickChange(st, id, true)
-		if err != nil {
-			return err
-		}
-		fp := fingerprint(root, proj.Environment)
+	err = WithChange(root, id, func(ch *Change) error {
+		ch.syncCatalog(proj)
 		code, payload = fn(ch, proj, fp)
 		return nil
 	})
@@ -229,39 +247,15 @@ func (a *app) withChange(id string, fn func(*Change, Project, Fingerprint) (int,
 	return code
 }
 
-func pickChange(st *State, id string, need bool) (*Change, error) {
-	if id != "" {
-		for i := range st.Changes {
-			if st.Changes[i].ID == id {
-				return &st.Changes[i], nil
-			}
-		}
-		return nil, fmt.Errorf("找不到变更 %s", id)
-	}
-	var opens []*Change
-	for i := range st.Changes {
-		s := st.Changes[i].Status
-		if s == StatusActive || s == StatusBlocked {
-			opens = append(opens, &st.Changes[i])
-		}
-	}
-	if len(opens) == 1 {
-		return opens[0], nil
-	}
-	if !need {
-		return nil, nil
-	}
-	if len(opens) == 0 {
-		return nil, fmt.Errorf("没有进行中的变更")
-	}
-	return nil, fmt.Errorf("有多个进行中的变更，请使用 --id")
-}
-
 func (a *app) changeCreate(args []string) int {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	fs.SetOutput(a.err)
 	goal := fs.String("goal", "", "变更目标")
-	rel := fs.String("release", "", "true、false，或留空沿用项目配置")
+	env := fs.String("environment", "", "覆盖 defaults.environment")
+	release := fs.String("release-stage", "", "included 或 excluded")
+	level := fs.String("artifact-level", "", "standard 或 abbreviated")
+	branch := fs.String("integration-branch", "", "覆盖集成分支")
+	intent := fs.String("integration-intent", "", "branch 或 not_in_current_iteration")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
@@ -276,49 +270,58 @@ func (a *app) changeCreate(args []string) int {
 	if err != nil {
 		return a.fail(ExitUsage, err.Error())
 	}
-	release := proj.Release
-	if *rel != "" {
-		switch *rel {
-		case "true":
-			release = true
-		case "false":
-			release = false
-		default:
-			return a.fail(ExitUsage, "--release 只能是 true 或 false")
+	pol := Policy{
+		Environment: proj.Defaults.Environment, ReleaseStage: proj.Defaults.ReleaseStage,
+		ArtifactLevel: proj.Defaults.ArtifactLevel, IntegrationBranch: proj.Defaults.IntegrationBranch,
+		IntegrationIntent: IntentBranch,
+	}
+	if *env != "" {
+		pol.Environment = *env
+	}
+	if *release != "" {
+		pol.ReleaseStage = *release
+	}
+	if *level != "" {
+		pol.ArtifactLevel = *level
+	}
+	if *intent != "" {
+		pol.IntegrationIntent = *intent
+	}
+	if *branch != "" {
+		pol.IntegrationBranch = *branch
+		if pol.IntegrationIntent == "" {
+			pol.IntegrationIntent = IntentBranch
 		}
 	}
-	var created Change
-	err = WithState(root, func(st *State) error {
-		for _, c := range st.Changes {
-			if c.Status == StatusActive || c.Status == StatusBlocked {
-				return fmt.Errorf("已有进行中的变更 %s。v0.1 同时只跟踪一个", c.ID)
-			}
-		}
-		created = Change{
-			ID: newID("c-"), Goal: *goal, Stage: StageDemand, Status: StatusActive,
-			Release: release, Profile: proj.Profile, Environment: proj.Environment,
-			CreatedAt: time.Now().UTC(),
-		}
-		created.History = append(created.History, Event{At: created.CreatedAt, Kind: "create", Message: *goal})
-		st.Changes = append(st.Changes, created)
-		return nil
-	})
-	if err != nil {
+	if pol.IntegrationIntent == IntentNotCurrent {
+		pol.IntegrationBranch = ""
+	}
+	if err := validatePolicy(proj, pol); err != nil {
+		return a.fail(ExitUsage, err.Error())
+	}
+	now := time.Now().UTC()
+	created := Change{
+		ID: newID("c-"), Goal: *goal, Stage: StageDemand, Status: StatusActive, Policy: pol,
+		CatalogHash: catalogHash(proj), CreatedAt: now,
+		History: []Event{{At: now, Kind: "create", Message: *goal}},
+	}
+	if err := createChange(root, &created); err != nil {
 		return a.fail(ExitUsage, err.Error())
 	}
 	if a.json {
-		return a.emit(ExitOK, map[string]any{"ok": true, "command": "change create", "id": created.ID, "stage": created.Stage, "release": created.Release})
+		return a.emit(ExitOK, map[string]any{"ok": true, "command": "change create", "id": created.ID, "stage": created.Stage, "policy": created.Policy})
 	}
-	fmt.Fprintf(a.out, "变更 %s\n阶段: %s\n发布意图: %t\n", created.ID, created.Stage, created.Release)
+	fmt.Fprintf(a.out, "变更 %s\n阶段: %s\n环境: %s\n发布阶段: %s\n产物级别: %s\n集成: %s %s\n",
+		created.ID, created.Stage, pol.Environment, pol.ReleaseStage, pol.ArtifactLevel, pol.IntegrationIntent, pol.IntegrationBranch)
 	return ExitOK
 }
 
 func (a *app) changeSubmit(args []string) int {
 	fs := flag.NewFlagSet("submit", flag.ContinueOnError)
 	fs.SetOutput(a.err)
-	id := fs.String("id", "", "变更 ID")
-	stage := fs.String("stage", "", "阶段名，默认当前阶段")
-	art := fs.String("artifact", "", "JSON 产物路径")
+	id := fs.String("id", "", "")
+	stage := fs.String("stage", "", "")
+	art := fs.String("artifact", "", "")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
@@ -356,15 +359,15 @@ func (a *app) changeSubmit(args []string) int {
 		if stageIndex(st) > stageIndex(ch.Stage) {
 			return a.fail(ExitGate, "不能提交还没走到的阶段"), nil
 		}
-		if err := validateArtifact(st, ch.Profile, m); err != nil {
+		if err := validateArtifact(st, ch.Policy.ArtifactLevel, m); err != nil {
 			return a.fail(ExitGate, err.Error()), nil
 		}
 		revised := st != ch.Stage || ch.artifact(st) != nil
 		ch.addArtifact(st, canon)
 		if revised {
-			ch.voidDownstream()
+			ch.invalidateEvidence()
 			ch.Stage = st
-			ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "revise", Message: "修正「" + st + "」，下游结论失效"})
+			ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "revise", Message: "修正「" + st + "」，下游结论和证据失效"})
 		} else {
 			ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "submit", Message: st})
 		}
@@ -383,8 +386,20 @@ func (a *app) changeAdvance(args []string) int {
 		if len(bad) > 0 {
 			return a.fail(ExitGate, strings.Join(bad, "；")), nil
 		}
+		if next == StageRelease {
+			if wt, oid, ok := findSharedHold(root); ok && oid != ch.ID {
+				return a.fail(ExitGate, fmt.Sprintf("共享 staging/production 正被 %s 的变更 %s 占用。其他流程可以继续开发和验收", wt, oid)), nil
+			}
+			ch.ReleaseHold = &ReleaseHold{Active: true, At: time.Now().UTC()}
+		}
+		if next == StageRetro && ch.Stage == StageRelease && ch.ReleaseHold != nil {
+			ch.ReleaseHold.Active = false
+		}
 		if next == StatusClosed {
 			ch.Status = StatusClosed
+			if ch.ReleaseHold != nil {
+				ch.ReleaseHold.Active = false
+			}
 			ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "close", Message: "复盘完成，正常关闭"})
 		} else {
 			prev := ch.Stage
@@ -399,8 +414,8 @@ func (a *app) changeRollback(args []string) int {
 	fs := flag.NewFlagSet("rollback", flag.ContinueOnError)
 	fs.SetOutput(a.err)
 	id := fs.String("id", "", "")
-	to := fs.String("to", "", "退回的阶段")
-	reason := fs.String("reason", "", "理由")
+	to := fs.String("to", "", "")
+	reason := fs.String("reason", "", "")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
@@ -418,7 +433,6 @@ func (a *app) changeRollback(args []string) int {
 		if stageIndex(*to) >= stageIndex(ch.Stage) {
 			return a.fail(ExitGate, "只能退回更早的阶段"), nil
 		}
-		ch.voidDownstream()
 		ch.Stage = *to
 		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "rollback", Message: *reason + " -> " + *to})
 		return ExitOK, a.payload(root, "change rollback", ch, proj, fp)
@@ -482,7 +496,11 @@ func (a *app) changeCancel(args []string) int {
 			return a.fail(ExitGate, "变更已经结束"), nil
 		}
 		ch.Status = StatusCancel
-		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "cancel", Message: *reason})
+		msg := *reason
+		if ch.ReleaseHold != nil && ch.ReleaseHold.Active {
+			msg += "。共享环境占用还在，没有自动撤回部署。人处理完后执行 change release clear"
+		}
+		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "cancel", Message: msg})
 		return ExitOK, a.payload(root, "change cancel", ch, proj, fp)
 	})
 }
@@ -511,10 +529,21 @@ func (a *app) changeAccept(args []string) int {
 	}
 	root, _ := a.projectRoot()
 	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
-		ch.Accepts = append(ch.Accepts, Accept{
-			What: *what, Source: *source, Reason: *reason, Scope: *scope,
-			At: time.Now().UTC(), Generation: ch.Generation, Fingerprint: fp.Hash,
-		})
+		acc := Accept{What: *what, Source: *source, Reason: *reason, Scope: *scope, At: time.Now().UTC()}
+		if *what == "delivery" {
+			if fp.Kind != "ok" {
+				return a.fail(ExitGate, fp.Note), nil
+			}
+			acc.BindKind = BindWorktree
+			acc.Fingerprint = fp.Hash
+		} else {
+			if !ch.mergedNow() {
+				return a.fail(ExitGate, "发布声明要绑到已记录且未撤回的集成 SHA"), nil
+			}
+			acc.BindKind = BindIntegration
+			acc.Fingerprint = ch.Merge.SHA
+		}
+		ch.Accepts = append(ch.Accepts, acc)
 		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "accept", Message: *what + " 来源 " + *source})
 		return ExitOK, a.payload(root, "change accept", ch, proj, fp)
 	})
@@ -533,19 +562,191 @@ func (a *app) changeVersion(args []string) int {
 		return a.fail(ExitUsage, "需要 --version")
 	}
 	if *source != "declaration" {
-		return a.fail(ExitUsage, "手填版本只能是 declaration。工具读回只能来自 release-readback 检查。")
+		return a.fail(ExitUsage, "手填版本只能是 declaration。工具读回只能来自 release_readback 检查。")
 	}
 	root, _ := a.projectRoot()
 	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
-		ch.DeclaredVersion = &VersionFact{Value: *ver, Source: "declaration", At: time.Now().UTC(), Generation: ch.Generation, Fingerprint: fp.Hash}
+		ch.DeclaredVersion = &VersionFact{Value: *ver, Source: "declaration", At: time.Now().UTC()}
 		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "declare-version", Message: *ver})
 		return ExitOK, a.payload(root, "change declare-version", ch, proj, fp)
 	})
 }
 
+func (a *app) changePolicy(args []string) int {
+	if len(args) == 0 || args[0] != "set" {
+		return a.fail(ExitUsage, "用法：lauren change policy set --reason ...")
+	}
+	fs := flag.NewFlagSet("policy set", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	id := fs.String("id", "", "")
+	env := fs.String("environment", "", "")
+	release := fs.String("release-stage", "", "")
+	level := fs.String("artifact-level", "", "")
+	branch := fs.String("integration-branch", "", "")
+	intent := fs.String("integration-intent", "", "")
+	reason := fs.String("reason", "", "")
+	if err := fs.Parse(args[1:]); err != nil {
+		return ExitUsage
+	}
+	if strings.TrimSpace(*reason) == "" {
+		return a.fail(ExitUsage, "修订 policy 需要 --reason")
+	}
+	if *env == "" && *release == "" && *level == "" && *branch == "" && *intent == "" {
+		return a.fail(ExitUsage, "没有要改的 policy 字段")
+	}
+	root, _ := a.projectRoot()
+	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
+		next := ch.Policy
+		if *env != "" {
+			next.Environment = *env
+		}
+		if *release != "" {
+			next.ReleaseStage = *release
+		}
+		if *level != "" {
+			next.ArtifactLevel = *level
+		}
+		if *intent != "" {
+			next.IntegrationIntent = *intent
+		}
+		if *branch != "" {
+			next.IntegrationBranch = *branch
+			if *intent == "" {
+				next.IntegrationIntent = IntentBranch
+			}
+		}
+		if next.IntegrationIntent == IntentNotCurrent {
+			next.IntegrationBranch = ""
+		}
+		if err := validatePolicy(proj, next); err != nil {
+			return a.fail(ExitUsage, err.Error()), nil
+		}
+		targetChanged := ch.Policy.IntegrationIntent != next.IntegrationIntent || ch.Policy.IntegrationBranch != next.IntegrationBranch
+		if targetChanged && ch.Merge != nil && !ch.Merge.Withdrawn {
+			return a.fail(ExitGate, fmt.Sprintf("已合入 %s %s，尚未撤回。请先 change integration withdraw，不能只改记录", ch.Merge.Branch, ch.Merge.SHA)), nil
+		}
+		if ch.Policy.Environment != next.Environment || ch.Policy.ReleaseStage != next.ReleaseStage {
+			ch.voidConclusions()
+		}
+		ch.Policy = next
+		if gap := ch.earliestArtifactGap(); gap != "" && stageIndex(gap) < stageIndex(ch.Stage) {
+			ch.Stage = gap
+			ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "policy", Message: "artifact_level 变了，已提交的「" + gap + "」不符合新规则"})
+		}
+		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "policy", Message: *reason})
+		return ExitOK, a.payload(root, "change policy set", ch, proj, fp)
+	})
+}
+
+func (a *app) changeIntegration(args []string) int {
+	if len(args) == 0 {
+		return a.fail(ExitUsage, "用法：lauren change integration record|withdraw")
+	}
+	switch args[0] {
+	case "record":
+		return a.integrationRecord(args[1:])
+	case "withdraw":
+		return a.integrationWithdraw(args[1:])
+	default:
+		return a.fail(ExitUsage, "未知 integration 子命令")
+	}
+}
+
+func (a *app) integrationRecord(args []string) int {
+	fs := flag.NewFlagSet("integration record", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	id := fs.String("id", "", "")
+	sha := fs.String("sha", "", "")
+	reason := fs.String("reason", "", "")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if !isSHA(*sha) || strings.TrimSpace(*reason) == "" {
+		return a.fail(ExitUsage, "需要 --sha 和 --reason。不会自动 merge 或 push")
+	}
+	root, _ := a.projectRoot()
+	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
+		if ch.Policy.IntegrationIntent != IntentBranch {
+			return a.fail(ExitGate, "本次流程暂不纳入当前迭代，不能记录合入共享集成分支"), nil
+		}
+		if ch.Merge != nil && !ch.Merge.Withdrawn {
+			return a.fail(ExitGate, "已有未撤回的集成记录 "+ch.Merge.SHA), nil
+		}
+		ch.Merge = &MergeRecord{Branch: ch.Policy.IntegrationBranch, SHA: *sha, At: time.Now().UTC(), Reason: *reason}
+		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "integrate", Message: ch.Policy.IntegrationBranch + " " + *sha})
+		return ExitOK, a.payload(root, "change integration record", ch, proj, fp)
+	})
+}
+
+func (a *app) integrationWithdraw(args []string) int {
+	fs := flag.NewFlagSet("integration withdraw", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	id := fs.String("id", "", "")
+	reason := fs.String("reason", "", "")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if strings.TrimSpace(*reason) == "" {
+		return a.fail(ExitUsage, "撤回需要 --reason。不会自动改 git 历史")
+	}
+	root, _ := a.projectRoot()
+	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
+		if ch.Merge == nil || ch.Merge.Withdrawn {
+			return a.fail(ExitGate, "没有可撤回的集成记录"), nil
+		}
+		sha := ch.Merge.SHA
+		ch.Merge.Withdrawn = true
+		for i := range ch.Accepts {
+			if ch.Accepts[i].BindKind == BindIntegration && ch.Accepts[i].Fingerprint == sha {
+				ch.Accepts[i].Voided = true
+			}
+		}
+		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "withdraw", Message: *reason + " " + sha})
+		return ExitOK, a.payload(root, "change integration withdraw", ch, proj, fp)
+	})
+}
+
+func (a *app) changeRelease(args []string) int {
+	if len(args) == 0 || args[0] != "clear" {
+		return a.fail(ExitUsage, "用法：lauren change release clear --reason ...")
+	}
+	fs := flag.NewFlagSet("release clear", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	id := fs.String("id", "", "")
+	reason := fs.String("reason", "", "")
+	if err := fs.Parse(args[1:]); err != nil {
+		return ExitUsage
+	}
+	if strings.TrimSpace(*reason) == "" {
+		return a.fail(ExitUsage, "释放共享环境占用需要 --reason")
+	}
+	root, _ := a.projectRoot()
+	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
+		if ch.ReleaseHold == nil || !ch.ReleaseHold.Active {
+			return a.fail(ExitGate, "没有占用共享环境"), nil
+		}
+		ch.ReleaseHold.Active = false
+		ch.ReleaseHold.Note = *reason
+		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "release-clear", Message: *reason})
+		return ExitOK, a.payload(root, "change release clear", ch, proj, fp)
+	})
+}
+
+func isSHA(s string) bool {
+	if len(s) < 7 || len(s) > 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
 func (a *app) changeProblem(args []string) int {
 	if len(args) == 0 {
-		return a.fail(ExitUsage, "用法：lauren change problem add|verify")
+		return a.fail(ExitUsage, "用法：lauren change problem add|dispose|verify")
 	}
 	switch args[0] {
 	case "add":
@@ -567,7 +768,7 @@ func (a *app) problemAdd(args []string) int {
 	repro := fs.String("repro", "", "")
 	expected := fs.String("expected", "", "")
 	actual := fs.String("actual", "", "")
-	disp := fs.String("disposition", "", "implemented、later 或 rejected")
+	disp := fs.String("disposition", "", "")
 	reason := fs.String("reason", "", "")
 	defense := fs.String("defense", "", "")
 	scope := fs.String("scope", "project", "")
@@ -590,10 +791,7 @@ func (a *app) problemAdd(args []string) int {
 	}
 	root, _ := a.projectRoot()
 	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
-		pb := Problem{
-			ID: newID("p-"), Summary: *summary, Repro: *repro, Expected: *expected, Actual: *actual,
-			Disposition: *disp, Reason: *reason, Defense: *defense, Scope: *scope,
-		}
+		pb := Problem{ID: newID("p-"), Summary: *summary, Repro: *repro, Expected: *expected, Actual: *actual, Disposition: *disp, Reason: *reason, Defense: *defense, Scope: *scope}
 		ch.Problems = append(ch.Problems, pb)
 		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "problem", Message: pb.ID + " " + *disp})
 		return ExitOK, a.payload(root, "change problem add", ch, proj, fp)
@@ -684,7 +882,8 @@ func (a *app) cmdCheck(args []string) int {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(a.err)
 	id := fs.String("id", "", "")
-	name := fs.String("name", "", "只跑一个检查")
+	name := fs.String("name", "", "")
+	envFlag := fs.String("environment", "", "这次检查的实际环境")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
@@ -695,6 +894,24 @@ func (a *app) cmdCheck(args []string) int {
 	proj, err := loadProject(root)
 	if err != nil {
 		return a.fail(ExitUsage, err.Error())
+	}
+	cid, err := resolveChangeID(root, *id, true)
+	if err != nil {
+		return a.fail(ExitUsage, err.Error())
+	}
+	ch0, err := readChange(root, cid)
+	if err != nil || ch0 == nil {
+		return a.fail(ExitUsage, "找不到变更")
+	}
+	if ch0.Status == StatusBlocked {
+		return a.fail(ExitBlocked, "变更被阻塞，未运行检查")
+	}
+	env := *envFlag
+	if env == "" {
+		env = ch0.Policy.Environment
+	}
+	if !containsStr(proj.Environments, env) {
+		return a.fail(ExitUsage, "环境 "+env+" 不在项目 environments 里")
 	}
 	var specs []CheckSpec
 	for _, ch := range proj.Checks {
@@ -708,55 +925,62 @@ func (a *app) cmdCheck(args []string) int {
 	if len(proj.Checks) == 0 {
 		return a.fail(ExitUsage, "项目配置没有检查命令")
 	}
-	var gen int
-	err = WithState(root, func(st *State) error {
-		ch, err := pickChange(st, *id, true)
-		if err != nil {
-			return err
-		}
-		if ch.Status == StatusBlocked {
-			return fmt.Errorf("变更被阻塞，未运行检查")
-		}
-		gen = ch.Generation
-		return nil
-	})
-	if err != nil {
-		code := ExitUsage
-		if strings.Contains(err.Error(), "阻塞") {
-			code = ExitBlocked
-		}
-		return a.fail(code, err.Error())
-	}
-	fp := fingerprint(root, proj.Environment)
+	fp := fingerprint(root, proj)
 	var runs []CheckRun
 	for _, spec := range specs {
-		runs = append(runs, runCheck(root, spec, fp, gen))
-	}
-	fpAfter := fingerprint(root, proj.Environment)
-	var code = ExitOK
-	err = WithState(root, func(st *State) error {
-		ch, err := pickChange(st, *id, true)
-		if err != nil {
-			return err
+		if spec.Gate == GateRelease || spec.Layer == "release_readback" {
+			switch {
+			case ch0.Policy.IntegrationIntent != IntentBranch:
+				runs = append(runs, blockedRun(spec, env, "暂不纳入当前迭代，不能占用共享预发或生产的发布读回"))
+			case ch0.Policy.IntegrationBranch != proj.Defaults.IntegrationBranch:
+				runs = append(runs, blockedRun(spec, env, "集成分支还不是项目当前集成分支，不能做共享环境发布读回"))
+			case !ch0.mergedNow():
+				runs = append(runs, blockedRun(spec, env, "尚未记录合入集成分支，不能把工作区里的版本当成已部署证据"))
+			case !envAccepted(spec, proj, env):
+				runs = append(runs, blockedRun(spec, env, "环境 "+env+" 不能充当 release_readback。开发或 CI 里打印的版本不是已部署证据"))
+			default:
+				if wt, oid, ok := findSharedHold(root); ok && oid != ch0.ID {
+					runs = append(runs, blockedRun(spec, env, fmt.Sprintf("共享环境正被 %s 的变更 %s 占用", wt, oid)))
+					continue
+				}
+				_ = WithChange(root, cid, func(ch *Change) error {
+					if ch.ReleaseHold == nil || !ch.ReleaseHold.Active {
+						ch.ReleaseHold = &ReleaseHold{Active: true, At: time.Now().UTC(), Note: "发布读回占用 staging/production"}
+					}
+					return nil
+				})
+				runs = append(runs, runCheck(root, cid, spec, fp, ch0.EvidenceGeneration, env, ch0.Policy.IntegrationBranch, ch0.Merge.SHA))
+			}
+			continue
 		}
-		if ch.Generation != gen {
-			return fmt.Errorf("变更在检查期间被修改，请重试")
+		if !envAccepted(spec, proj, env) {
+			runs = append(runs, blockedRun(spec, env, "环境 "+env+" 不在该检查可接受的证据环境里"))
+			continue
+		}
+		runs = append(runs, runCheck(root, cid, spec, fp, ch0.EvidenceGeneration, env, "", ""))
+	}
+	fpAfter := fingerprint(root, proj)
+	code := ExitOK
+	err = WithChange(root, cid, func(ch *Change) error {
+		ch.syncCatalog(proj)
+		if ch.EvidenceGeneration != ch0.EvidenceGeneration {
+			return fmt.Errorf("检查期间证据目录变了，请重试")
 		}
 		for i := range runs {
-			if runs[i].Layer == "release-readback" && runs[i].Status == "pass" {
-				if v := toolVersionFrom(runs[i], root); v != "" {
-					ch.ToolVersion = &VersionFact{Value: v, Source: "tool", At: time.Now().UTC(), Generation: ch.Generation, Fingerprint: runs[i].Fingerprint}
-				}
-			}
 			ch.Runs = append(ch.Runs, runs[i])
-			if runs[i].Status != "pass" {
+			if runs[i].Status != "pass" || (runs[i].BindKind == BindWorktree && !envAccepted(findSpec(proj, runs[i].Name), proj, runs[i].Environment)) {
 				code = ExitCheck
 			}
 		}
 		if fpAfter.Kind != "ok" || fpAfter.Hash != fp.Hash {
-			code = ExitCheck
+			for _, r := range runs {
+				if r.BindKind == BindWorktree {
+					code = ExitCheck
+				}
+			}
 		}
-		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "check", Message: fmt.Sprintf("运行 %d 项", len(runs))})
+		noteCheckFailures(ch, runs)
+		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "check", Message: fmt.Sprintf("%s 运行 %d 项", env, len(runs))})
 		view := a.payload(root, "check", ch, proj, fpAfter)
 		view.OK = code == ExitOK
 		if a.json {
@@ -767,43 +991,65 @@ func (a *app) cmdCheck(args []string) int {
 		return nil
 	})
 	if err != nil {
-		return a.fail(codeOr(code, ExitUsage), err.Error())
+		return a.fail(ExitUsage, err.Error())
 	}
 	return code
 }
 
-func codeOr(code, fallback int) int {
-	if code != ExitOK {
-		return code
+func findSpec(p Project, name string) CheckSpec {
+	if s := findCheck(p, name); s != nil {
+		return *s
 	}
-	return fallback
+	return CheckSpec{Name: name}
 }
 
-func (a *app) cmdStatus(args []string) int {
-	id := flagID(a.err, args)
+func blockedRun(spec CheckSpec, env, note string) CheckRun {
+	now := time.Now().UTC()
+	return CheckRun{
+		ID: newID("r-"), Name: spec.Name, Layer: spec.Layer, Gate: spec.Gate, Argv: spec.Argv,
+		Environment: env, Status: "blocked", Started: now, Ended: now, Note: note,
+		BindKind: BindWorktree, CandidateKind: "blocked",
+	}
+}
+
+func noteCheckFailures(ch *Change, runs []CheckRun) {
+	for _, r := range runs {
+		if r.Status != "fail" {
+			continue
+		}
+		if r.Gate == GateAcceptance && (ch.Stage == StageAccept || ch.Stage == StageRelease) {
+			ch.Stage = StageBuild
+			ch.addOpenProblem(r.Name+" 验收失败", "验收检查失败。回到实现与自验，不能把验收改成通过。")
+			ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "loop", Message: "验收失败，回到实现与自验"})
+		}
+		if (r.Gate == GateRelease || r.Layer == "release_readback") && ch.Stage == StageRelease {
+			ch.Stage = StageBuild
+			ch.addOpenProblem(r.Name+" 发布读回失败", "没有自动部署或撤回。共享环境需要人处理，然后 change release clear。")
+			if ch.ReleaseHold != nil {
+				ch.ReleaseHold.Note = "发布读回失败，占用保留到人处理"
+			}
+			ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "loop", Message: "发布读回失败，回到实现与自验。没有自动撤回共享环境"})
+		}
+	}
+}
+
+func (c *Change) addOpenProblem(summary, actual string) {
+	for _, pb := range c.Problems {
+		if pb.Summary == summary && pb.Disposition == "" {
+			return
+		}
+	}
+	c.Problems = append(c.Problems, Problem{ID: newID("p-"), Summary: summary, Actual: actual, Scope: "change"})
+}
+
+func (a *app) cmdStatus(args []string) int  { return a.show("status", flagID(a.err, args), false) }
+func (a *app) cmdHistory(args []string) int { return a.show("history", flagID(a.err, args), true) }
+func (a *app) cmdNext(args []string) int    { return a.show("next", flagID(a.err, args), false) }
+
+func (a *app) show(cmd string, id idFlag, hist bool) int {
 	if id.err != nil {
 		return ExitUsage
 	}
-	return a.show("status", id.id, false)
-}
-
-func (a *app) cmdHistory(args []string) int {
-	id := flagID(a.err, args)
-	if id.err != nil {
-		return ExitUsage
-	}
-	return a.show("history", id.id, true)
-}
-
-func (a *app) cmdNext(args []string) int {
-	id := flagID(a.err, args)
-	if id.err != nil {
-		return ExitUsage
-	}
-	return a.show("next", id.id, false)
-}
-
-func (a *app) show(cmd, id string, hist bool) int {
 	root, err := a.projectRoot()
 	if err != nil {
 		return a.fail(ExitUsage, err.Error())
@@ -812,20 +1058,22 @@ func (a *app) show(cmd, id string, hist bool) int {
 	if err != nil {
 		return a.fail(ExitUsage, err.Error())
 	}
+	cid, err := resolveChangeID(root, id.id, false)
+	if err != nil {
+		return a.fail(ExitUsage, err.Error())
+	}
+	if cid == "" {
+		p := statusPayload{OK: true, Command: cmd, Next: []string{"创建变更"}}
+		if a.json {
+			return a.emit(ExitOK, p)
+		}
+		writeHuman(a.out, p)
+		return ExitOK
+	}
 	var payload statusPayload
-	err = WithState(root, func(st *State) error {
-		ch, err := pickChange(st, id, false)
-		if err != nil {
-			return err
-		}
-		if ch == nil && id == "" && len(st.Changes) > 0 {
-			ch = &st.Changes[len(st.Changes)-1]
-		}
-		if ch == nil {
-			payload = statusPayload{OK: true, Command: cmd, Next: []string{"创建变更"}}
-			return nil
-		}
-		fp := fingerprint(root, proj.Environment)
+	err = WithChange(root, cid, func(ch *Change) error {
+		ch.syncCatalog(proj)
+		fp := fingerprint(root, proj)
 		payload = a.payload(root, cmd, ch, proj, fp)
 		if hist {
 			payload.History = ch.History
@@ -860,14 +1108,16 @@ func flagID(errw io.Writer, args []string) idFlag {
 type checkView struct {
 	Name            string `json:"name"`
 	Layer           string `json:"layer"`
-	When            string `json:"when"`
+	Gate            string `json:"gate"`
+	Environment     string `json:"environment,omitempty"`
 	Status          string `json:"status"`
 	EffectiveStatus string `json:"effective_status"`
 	ExitCode        *int   `json:"exit_code"`
-	Cwd             string `json:"cwd"`
+	Cwd             string `json:"cwd,omitempty"`
 	LogPath         string `json:"log_path,omitempty"`
 	LogBytes        int    `json:"log_bytes"`
 	Preview         string `json:"preview,omitempty"`
+	Note            string `json:"note,omitempty"`
 }
 
 type problemView struct {
@@ -894,9 +1144,11 @@ type statusPayload struct {
 	Goal            string        `json:"goal,omitempty"`
 	Stage           string        `json:"stage,omitempty"`
 	Status          string        `json:"status,omitempty"`
-	ReleaseIntent   bool          `json:"release_intent,omitempty"`
+	Policy          *Policy       `json:"policy,omitempty"`
 	Block           string        `json:"block,omitempty"`
 	Candidate       Fingerprint   `json:"candidate,omitempty"`
+	Merge           *MergeRecord  `json:"merge,omitempty"`
+	ReleaseHold     bool          `json:"release_hold,omitempty"`
 	DeclaredVersion *VersionFact  `json:"declared_version,omitempty"`
 	ToolVersion     *VersionFact  `json:"tool_version,omitempty"`
 	Facts           *facts        `json:"facts,omitempty"`
@@ -910,30 +1162,30 @@ type statusPayload struct {
 func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint) statusPayload {
 	p := statusPayload{
 		OK: true, Command: cmd, ID: ch.ID, Goal: ch.Goal, Stage: ch.Stage, Status: ch.Status,
-		ReleaseIntent: ch.Release, Candidate: fp, DeclaredVersion: currentVersion(ch.DeclaredVersion, ch.Generation, fp), ToolVersion: currentVersion(ch.ToolVersion, ch.Generation, fp),
+		Policy: &ch.Policy, Candidate: fp, Merge: ch.Merge, DeclaredVersion: ch.DeclaredVersion,
 		Next:  nextActions(ch, proj, fp),
-		Trust: "本地状态文件可以被改写。这个 CLI 不认证人类，也不能防止恶意篡改。合并是否可信看仓库 CI 重跑；交付是否接受看来源被明确记下的接受记录。",
+		Trust: "本地状态文件可以被改写。这个 CLI 不认证人类，也不能防止恶意篡改。合并是否可信看仓库 CI 重跑；交付是否接受看来源被明确记下的接受记录。不会自动 merge、push、部署或通知。",
 	}
 	if ch.Block != nil && ch.Status == StatusBlocked {
 		p.Block = ch.Block.Reason
 	}
+	if ch.ReleaseHold != nil && ch.ReleaseHold.Active {
+		p.ReleaseHold = true
+	}
 	seen := map[string]bool{}
 	for i := len(ch.Runs) - 1; i >= 0; i-- {
 		r := ch.Runs[i]
-		if seen[r.Name] {
+		if seen[r.Name+"@"+r.Environment] {
 			continue
 		}
-		seen[r.Name] = true
+		seen[r.Name+"@"+r.Environment] = true
 		p.Checks = append([]checkView{{
-			Name: r.Name, Layer: r.Layer, When: r.When, Status: r.Status,
-			EffectiveStatus: ch.effective(r, fp), ExitCode: r.ExitCode, Cwd: r.Cwd,
-			LogPath: r.LogPath, LogBytes: r.LogBytes, Preview: r.Preview,
+			Name: r.Name, Layer: r.Layer, Gate: r.Gate, Environment: r.Environment,
+			Status: r.Status, EffectiveStatus: ch.effective(r, fp), ExitCode: r.ExitCode,
+			Cwd: r.Cwd, LogPath: r.LogPath, LogBytes: r.LogBytes, Preview: r.Preview, Note: r.Note,
 		}}, p.Checks...)
 	}
-	product := true
-	if len(proj.Requirements) == 0 {
-		product = false
-	}
+	product := len(proj.Requirements) > 0
 	for _, req := range proj.Requirements {
 		if !req.Required {
 			continue
@@ -943,20 +1195,30 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 			product = false
 		}
 	}
+	if len(proj.Requirements) == 0 {
+		product = false
+	}
 	releaseVerified := false
-	needTool := false
-	for _, chs := range proj.Checks {
-		if chs.When == "release" && chs.Required {
-			needTool = true
+	var tool *VersionFact
+	if hasRequiredCheck(proj, GateRelease) {
+		releaseVerified = len(ch.requiredFresh(proj, GateRelease, fp)) == 0
+		for _, spec := range proj.Checks {
+			if spec.Layer != "release_readback" {
+				continue
+			}
+			run, _ := ch.satisfying(spec, proj, fp)
+			if run != nil {
+				if v := toolVersionFrom(*run, root); v != "" {
+					tool = &VersionFact{Value: v, Source: "tool", At: run.Ended}
+				}
+			}
 		}
 	}
-	if needTool {
-		releaseVerified = len(ch.requiredFresh(proj, "release", fp)) == 0 && ch.latestRun(firstName(proj, "release")) != nil
-	}
+	p.ToolVersion = tool
 	p.Facts = &facts{
 		ResultsRecorded:  len(ch.Runs) > 0,
-		DeliveryAccepted: ch.liveAccept("delivery", fp) != nil,
-		ReleaseDeclared:  ch.liveAccept("release", fp) != nil,
+		DeliveryAccepted: fp.Kind == "ok" && ch.liveAccept("delivery", BindWorktree, fp.Hash) != nil,
+		ReleaseDeclared:  ch.mergedNow() && ch.liveAccept("release", BindIntegration, ch.Merge.SHA) != nil,
 		ReleaseVerified:  releaseVerified,
 		ProductVerified:  product,
 	}
@@ -969,36 +1231,30 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 	return p
 }
 
-func currentVersion(v *VersionFact, gen int, fp Fingerprint) *VersionFact {
-	if v.current(gen, fp) {
-		return v
-	}
-	return nil
-}
-
-func firstName(p Project, when string) string {
-	for _, c := range p.Checks {
-		if c.When == when {
-			return c.Name
-		}
-	}
-	return ""
-}
-
 func writeHuman(w io.Writer, p statusPayload) {
 	if p.ID == "" {
-		fmt.Fprintln(w, "没有进行中的变更")
+		fmt.Fprintln(w, "这个工作区没有进行中的变更")
 		fmt.Fprintln(w, "下一合法动作:")
 		for _, n := range p.Next {
 			fmt.Fprintln(w, "  - "+n)
 		}
 		return
 	}
-	fmt.Fprintf(w, "变更: %s\n目标: %s\n阶段: %s\n状态: %s\n发布意图: %t\n", p.ID, p.Goal, p.Stage, p.Status, p.ReleaseIntent)
+	fmt.Fprintf(w, "变更: %s\n目标: %s\n阶段: %s\n状态: %s\n", p.ID, p.Goal, p.Stage, p.Status)
+	if p.Policy != nil {
+		fmt.Fprintf(w, "环境: %s\n发布阶段: %s\n产物级别: %s\n集成意图: %s\n集成分支: %s\n",
+			p.Policy.Environment, p.Policy.ReleaseStage, p.Policy.ArtifactLevel, p.Policy.IntegrationIntent, p.Policy.IntegrationBranch)
+	}
 	if p.Block != "" {
 		fmt.Fprintf(w, "阻塞: %s\n", p.Block)
 	}
 	fmt.Fprintf(w, "候选: %s %s\n", p.Candidate.Kind, p.Candidate.Hash)
+	if p.Merge != nil {
+		fmt.Fprintf(w, "集成记录: %s %s 已撤回=%t\n", p.Merge.Branch, p.Merge.SHA, p.Merge.Withdrawn)
+	}
+	if p.ReleaseHold {
+		fmt.Fprintln(w, "共享环境占用: 是")
+	}
 	if p.Facts != nil {
 		fmt.Fprintf(w, "结果已记录: %t\n交付已接受: %t\n发布已声明: %t\n发布已由工具读回: %t\n产品要求已满足: %t\n",
 			p.Facts.ResultsRecorded, p.Facts.DeliveryAccepted, p.Facts.ReleaseDeclared, p.Facts.ReleaseVerified, p.Facts.ProductVerified)
@@ -1016,7 +1272,10 @@ func writeHuman(w io.Writer, p statusPayload) {
 			if c.ExitCode != nil {
 				exit = fmt.Sprintf("exit %d", *c.ExitCode)
 			}
-			fmt.Fprintf(w, "  %s %s %s 记录=%s 有效=%s %s\n", c.Name, c.When, c.Layer, c.Status, c.EffectiveStatus, exit)
+			fmt.Fprintf(w, "  %s %s %s env=%s 记录=%s 有效=%s %s\n", c.Name, c.Gate, c.Layer, c.Environment, c.Status, c.EffectiveStatus, exit)
+			if c.Note != "" {
+				fmt.Fprintf(w, "    %s\n", c.Note)
+			}
 		}
 	}
 	if len(p.Problems) > 0 {

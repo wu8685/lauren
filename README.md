@@ -14,7 +14,7 @@
 go build -o dist/lauren ./cmd/lauren
 ```
 
-`dist/lauren` 是安装下来的程序。目标项目的配置是 `lauren.project.json`，运行状态和证据在该项目的 `.lauren/runtime/`。两边分开。本仓库没有自动拉取 `main` 或 `git reset` 的命令。
+`dist/lauren` 是安装下来的程序。目标项目的共享配置是 `lauren.project.json`。每次变更的 policy 写在该变更自己的状态里。运行状态在 `.lauren/runtime/changes/<id>/`，当前工作区的指针在 `.lauren/runtime/worktree.json`。这些都不进 git。本仓库没有自动拉取或 `git reset` 的命令。
 
 macOS 上的使用方式是拿走这个程序来运行，并在目标项目里执行检查。这里的开发和测试在 Linux 上完成，没有在 Mac 上跑过。
 
@@ -32,7 +32,7 @@ bash examples/shelf/run-demo.sh
 
 ```bash
 cd examples/shelf   # 演示请先复制到临时目录并 git init，见 run-demo.sh
-../../dist/lauren change create --goal "空选择时走明确失败路径" --release true
+../../dist/lauren change create --goal "空选择时走明确失败路径"
 ../../dist/lauren change submit --artifact artifacts/demand.json
 ../../dist/lauren change advance
 ../../dist/lauren status
@@ -40,9 +40,9 @@ cd examples/shelf   # 演示请先复制到临时目录并 git init，见 run-de
 ../../dist/lauren --json status
 ```
 
-`status` 把阶段、整体状态、检查结果、交付接受、发布声明和工具读回分开显示。没有完成百分比，也没有「已通知」。
+`status` 把阶段、整体状态、policy、检查结果、交付接受、发布声明和工具读回分开显示。没有完成百分比，也没有「已通知」。
 
-当前限制：一个项目同时只能有一个进行中的变更（`active` 或 `blocked`），结束之后才能开下一个。项目目录必须是 git 根。`.lauren/runtime/` 和 git 忽略文件不进入源码指纹，原因见 [docs/v0.1.md](docs/v0.1.md)。检查进程超过 120 秒记为失败。
+当前限制：同一个工作区同时只能有一个 `active` 或 `blocked` 的变更；另一个 git worktree 可以各自再有一个。项目目录必须是 git 根。`.lauren/runtime/` 和 git 忽略文件不进入源码指纹。只改项目 `defaults` 不会作废已有流程的证据；改 `checks` 或 `requirements` 会。检查进程超过 120 秒记为失败。细节见 [docs/v0.1.md](docs/v0.1.md)。
 
 新项目可以先 `lauren init`。检查命令写进 `lauren.project.json` 的 `argv`，由 `lauren check` 实际执行。这个配置是显式信任的，程序不会把变更目标拼成 shell。
 

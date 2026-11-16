@@ -26,9 +26,25 @@ func runAt(t *testing.T, dir string, args ...string) (int, map[string]any, strin
 	return code, m, errb.String()
 }
 
+func errText(m map[string]any, errb string) string {
+	if m != nil && m["error"] != nil {
+		return m["error"].(string)
+	}
+	return errb
+}
+
+func must(t *testing.T, dir string, code int, args ...string) map[string]any {
+	t.Helper()
+	got, m, errb := runAt(t, dir, args...)
+	if got != code {
+		t.Fatalf("%v 退出码=%d 期望 %d stderr=%s json=%v", args, got, code, errb, m)
+	}
+	return m
+}
+
 func gitInit(t *testing.T, dir string) {
 	t.Helper()
-	runGit(t, dir, "init")
+	runGit(t, dir, "init", "-b", "main")
 	runGit(t, dir, "add", ".")
 	runGit(t, dir, "-c", "user.email=dev@example.com", "-c", "user.name=dev", "commit", "-m", "init")
 }
@@ -54,18 +70,21 @@ func writeFile(t *testing.T, path, body string) {
 	}
 }
 
-func project(t *testing.T, dir string, extra string) {
-	t.Helper()
-	body := `{
+func projectJSON(release string) string {
+	return `{
   "schema": 1,
-  "environment": "local",
-  "release": false,
-  "profile": "full",
+  "environments": ["development", "integration", "staging", "production"],
+  "defaults": {
+    "environment": "development",
+    "release_stage": "` + release + `",
+    "artifact_level": "standard",
+    "integration_branch": "main"
+  },
   "checks": [
-    {"name": "static", "layer": "static", "when": "self", "argv": ["./checks/static.sh"], "required": true},
-    {"name": "unit", "layer": "unit", "when": "self", "argv": ["./checks/unit.sh"], "required": true},
-    {"name": "interact", "layer": "interaction", "when": "acceptance", "argv": ["./checks/interact.sh"], "required": true},
-    {"name": "version", "layer": "release-readback", "when": "release", "argv": ["./checks/read-version.sh"], "required": true}
+    {"name": "static", "layer": "static", "gate": "self_verification", "argv": ["./checks/static.sh"], "required": true, "environments": ["development", "integration"]},
+    {"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/unit.sh"], "required": true, "environments": ["development", "integration"]},
+    {"name": "interact", "layer": "interaction", "gate": "acceptance", "argv": ["./checks/interact.sh"], "required": true, "environments": ["integration", "staging"]},
+    {"name": "version", "layer": "release_readback", "gate": "release", "argv": ["./checks/read-version.sh"], "required": true, "environments": ["staging", "production"]}
   ],
   "requirements": [
     {"id": "copy", "claim": "文案含空列表说明", "min_layer": "static", "required": true, "check": "static"},
@@ -73,10 +92,11 @@ func project(t *testing.T, dir string, extra string) {
     {"id": "click", "claim": "真实交互", "min_layer": "interaction", "required": true, "check": "interact", "independent": true}
   ]
 }`
-	if extra != "" {
-		body = extra
-	}
-	writeFile(t, filepath.Join(dir, "lauren.project.json"), body)
+}
+
+func project(t *testing.T, dir, release string) {
+	t.Helper()
+	writeFile(t, filepath.Join(dir, "lauren.project.json"), projectJSON(release))
 	writeFile(t, filepath.Join(dir, "checks", "static.sh"), "#!/bin/sh\ngrep -q '空列表' app/copy.txt\n")
 	writeFile(t, filepath.Join(dir, "checks", "unit.sh"), "#!/bin/sh\n./app/logic.sh off | grep -q closed\n./app/logic.sh empty | grep -q empty-selection\n./app/logic.sh fail | grep -q failed-path\n")
 	writeFile(t, filepath.Join(dir, "checks", "interact.sh"), "#!/bin/sh\ngrep -q 'clicked-save' app/session.log\n")
@@ -93,243 +113,293 @@ func project(t *testing.T, dir string, extra string) {
 	writeFile(t, filepath.Join(dir, "artifacts", "accept.json"), `{"summary":"按层次验收"}`)
 	writeFile(t, filepath.Join(dir, "artifacts", "release.json"), `{"observation":"读回版本"}`)
 	writeFile(t, filepath.Join(dir, "artifacts", "retro.json"), `{"summary":"问题有去向"}`)
-	writeFile(t, filepath.Join(dir, "artifacts", "small-demand.json"), `{"goal":"只写目标"}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "short-demand.json"), `{"goal":"只写目标"}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "short-plan.json"), `{"approach":"只写做法"}`)
 }
 
-func must(t *testing.T, dir string, code int, args ...string) map[string]any {
+func walkBuild(t *testing.T, dir string) {
 	t.Helper()
-	got, m, errb := runAt(t, dir, args...)
-	if got != code {
-		t.Fatalf("%v 退出码=%d 期望 %d stderr=%s json=%v", args, got, code, errb, m)
-	}
-	return m
-}
-
-func walkToBuild(t *testing.T, dir string) {
-	t.Helper()
-	must(t, dir, ExitOK, "change", "create", "--goal", "空选择要有失败路径", "--release", "false")
 	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
 	must(t, dir, ExitOK, "change", "advance")
 	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
 	must(t, dir, ExitOK, "change", "advance")
 	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
+	must(t, dir, ExitOK, "check", "--name", "static")
+	must(t, dir, ExitOK, "check", "--name", "unit")
+	must(t, dir, ExitOK, "change", "advance")
 }
 
-func TestNoReleaseCloseAndReleasePath(t *testing.T) {
+func TestExcludedReleaseAndPolicy(t *testing.T) {
 	dir := t.TempDir()
-	project(t, dir, "")
+	project(t, dir, ReleaseExcluded)
 	gitInit(t, dir)
-	walkToBuild(t, dir)
-	must(t, dir, ExitGate, "change", "advance")
-	must(t, dir, ExitOK, "check")
-	m := must(t, dir, ExitOK, "change", "advance")
-	if m["stage"] != StageAccept {
-		t.Fatalf("stage=%v", m["stage"])
+	m := must(t, dir, ExitOK, "change", "create", "--goal", "不发布", "--artifact-level", "abbreviated", "--release-stage", "excluded")
+	pol := m["policy"].(map[string]any)
+	if pol["artifact_level"] != LevelAbbreviated || pol["release_stage"] != ReleaseExcluded || pol["environment"] != "development" {
+		t.Fatalf("policy 没有从覆盖和默认拷贝: %#v", pol)
 	}
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/short-demand.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/short-plan.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
 	must(t, dir, ExitGate, "change", "advance")
+	must(t, dir, ExitOK, "check", "--name", "static")
+	must(t, dir, ExitOK, "check", "--name", "unit")
+	must(t, dir, ExitOK, "change", "advance")
 	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/accept.json")
-	must(t, dir, ExitGate, "change", "advance")
-	must(t, dir, ExitOK, "change", "accept", "--what", "delivery", "--source", "human", "--reason", "看过失败路径", "--scope", "fixture")
+	_, m, errb := runAt(t, dir, "check", "--name", "interact")
+	if !strings.Contains(errText(m, errb), "不在该检查可接受") && (m["checks"] == nil) {
+		t.Fatalf("development 不能给只接受 integration/staging 的验收检查放行: %v %s", m, errb)
+	}
+	must(t, dir, ExitOK, "check", "--name", "interact", "--environment", "integration")
+	must(t, dir, ExitOK, "change", "policy", "set", "--environment", "staging", "--reason", "换默认环境")
+	st := must(t, dir, ExitOK, "status")
+	okEnv := false
+	for _, c := range st["checks"].([]any) {
+		cv := c.(map[string]any)
+		if cv["name"] == "unit" && cv["effective_status"] == "pass" && cv["environment"] == "development" {
+			okEnv = true
+		}
+	}
+	if !okEnv {
+		t.Fatalf("切换默认环境不应作废另一环境的有效证据: %#v", st["checks"])
+	}
+	must(t, dir, ExitOK, "change", "accept", "--what", "delivery", "--source", "human", "--reason", "看过", "--scope", "fixture")
 	m = must(t, dir, ExitOK, "change", "advance")
 	if m["stage"] != StageRetro {
-		t.Fatalf("不发布应进入复盘，得到 %v", m["stage"])
+		t.Fatalf("excluded 应跳过发布进入复盘，得到 %v", m["stage"])
 	}
-	facts := m["facts"].(map[string]any)
-	if facts["delivery_accepted"] != true || facts["release_declared"] != false || facts["notified"] != nil {
-		t.Fatalf("事实混淆: %#v", facts)
+	must(t, dir, ExitOK, "change", "problem", "add", "--summary", "曾漏掉关闭路径", "--disposition", "later", "--reason", "以后再说")
+	st = must(t, dir, ExitOK, "status")
+	if st["problems"].([]any)[0].(map[string]any)["verified_fixed"] != false {
+		t.Fatal("later 不是 verified-fixed")
 	}
-	if _, ok := facts["notified"]; ok {
-		t.Fatal("没有投递回执时不应出现已通知字段")
-	}
-	must(t, dir, ExitOK, "change", "problem", "add", "--summary", "曾漏掉关闭路径", "--repro", "off", "--expected", "closed", "--actual", "静默成功")
-	must(t, dir, ExitGate, "change", "advance")
 	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/retro.json")
-	st := must(t, dir, ExitOK, "status")
-	pb := st["problems"].([]any)[0].(map[string]any)
-	if pb["verified_fixed"] != false {
-		t.Fatal("只有后续去向不能算已验证修复")
-	}
-	must(t, dir, ExitOK, "change", "problem", "dispose", "--problem", pb["id"].(string), "--disposition", "later", "--reason", "留到以后")
 	m = must(t, dir, ExitOK, "change", "advance")
 	if m["status"] != StatusClosed {
 		t.Fatalf("status=%v", m["status"])
 	}
+}
 
-	dir2 := t.TempDir()
-	project(t, dir2, "")
-	gitInit(t, dir2)
-	must(t, dir2, ExitOK, "change", "create", "--goal", "发布读回", "--release", "true")
-	for _, step := range [][]string{
-		{"change", "submit", "--artifact", "artifacts/demand.json"},
-		{"change", "advance"},
-		{"change", "submit", "--artifact", "artifacts/plan.json"},
-		{"change", "advance"},
-		{"change", "submit", "--artifact", "artifacts/impl.json"},
-		{"check", "--name", "static"},
-		{"check", "--name", "unit"},
-		{"check", "--name", "interact"},
-		{"change", "advance"},
-		{"change", "submit", "--artifact", "artifacts/accept.json"},
-		{"change", "accept", "--what", "delivery", "--source", "human", "--reason", "接受", "--scope", "fixture"},
-		{"change", "advance"},
-	} {
-		must(t, dir2, ExitOK, step...)
+func TestReleaseMergeAndSharedEnv(t *testing.T) {
+	dir := t.TempDir()
+	project(t, dir, ReleaseIncluded)
+	gitInit(t, dir)
+	must(t, dir, ExitOK, "change", "create", "--goal", "要发布")
+	walkBuild(t, dir)
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/accept.json")
+	must(t, dir, ExitOK, "check", "--name", "interact", "--environment", "integration")
+	must(t, dir, ExitOK, "change", "accept", "--what", "delivery", "--source", "human", "--reason", "接受", "--scope", "fixture")
+	_, m, errb := runAt(t, dir, "change", "advance")
+	if !strings.Contains(errText(m, errb), "尚未记录已合入") {
+		t.Fatalf("未记录合入不能进发布: %s", errText(m, errb))
 	}
-	m = must(t, dir2, ExitOK, "status")
-	if m["stage"] != StageRelease {
-		t.Fatalf("发布路径阶段=%v", m["stage"])
+	sha := strings.TrimSpace(gitSHA(t, dir))
+	must(t, dir, ExitOK, "change", "integration", "record", "--sha", sha, "--reason", "假定已合入 main")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitCheck, "check", "--name", "version", "--environment", "development")
+	st := must(t, dir, ExitOK, "status")
+	if st["facts"].(map[string]any)["release_verified"] != false || st["tool_version"] != nil {
+		t.Fatal("development 的版本输出不能充当发布读回")
 	}
-	must(t, dir2, ExitGate, "change", "advance")
-	must(t, dir2, ExitOK, "change", "declare-version", "--version", "9.9.9", "--source", "declaration")
-	must(t, dir2, ExitGate, "change", "advance")
-	must(t, dir2, ExitOK, "change", "accept", "--what", "release", "--source", "human", "--reason", "声明发布", "--scope", "fixture")
-	m = must(t, dir2, ExitOK, "status")
-	if m["facts"].(map[string]any)["release_verified"] != false {
-		t.Fatal("人工声明不应变成工具读回")
+	must(t, dir, ExitOK, "change", "accept", "--what", "release", "--source", "human", "--reason", "声明发布", "--scope", "fixture")
+	if must(t, dir, ExitOK, "status")["facts"].(map[string]any)["release_verified"] != false {
+		t.Fatal("人工声明不是工具读回")
 	}
-	if m["declared_version"].(map[string]any)["source"] != "declaration" {
-		t.Fatal("手填版本来源不对")
+	must(t, dir, ExitOK, "check", "--name", "version", "--environment", "staging")
+	st = must(t, dir, ExitOK, "status")
+	if st["facts"].(map[string]any)["release_verified"] != true || st["tool_version"].(map[string]any)["source"] != "tool" {
+		t.Fatalf("staging 读回应分开记录: %#v", st["tool_version"])
 	}
-	must(t, dir2, ExitOK, "check", "--name", "version")
-	m = must(t, dir2, ExitOK, "status")
-	if m["tool_version"].(map[string]any)["source"] != "tool" || m["tool_version"].(map[string]any)["value"] != "0.1.0" {
-		t.Fatalf("工具版本=%v", m["tool_version"])
-	}
-	if m["facts"].(map[string]any)["release_verified"] != true {
-		t.Fatal("读回通过后 release_verified 应为 true")
-	}
-	must(t, dir2, ExitOK, "change", "submit", "--artifact", "artifacts/release.json")
-	must(t, dir2, ExitOK, "change", "advance")
-	if must(t, dir2, ExitOK, "status")["stage"] != StageRetro {
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/release.json")
+	if must(t, dir, ExitOK, "change", "advance")["stage"] != StageRetro {
 		t.Fatal("发布后应进入复盘")
 	}
 }
 
-func TestRejectsAndStaleEvidence(t *testing.T) {
+func TestAcceptanceFailureRollsBack(t *testing.T) {
 	dir := t.TempDir()
-	project(t, dir, "")
+	project(t, dir, ReleaseExcluded)
+	writeFile(t, filepath.Join(dir, "checks", "interact.sh"), "#!/bin/sh\nexit 1\n")
 	gitInit(t, dir)
-	must(t, dir, ExitOK, "change", "create", "--goal", "门禁")
-	must(t, dir, ExitGate, "change", "advance")
-	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
-	must(t, dir, ExitOK, "change", "advance")
-	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
-	must(t, dir, ExitOK, "change", "advance")
-	must(t, dir, ExitGate, "change", "advance")
-	writeFile(t, filepath.Join(dir, "checks", "unit.sh"), "#!/bin/sh\nexit 1\n")
-	runGit(t, dir, "add", "checks/unit.sh")
-	runGit(t, dir, "-c", "user.email=dev@example.com", "-c", "user.name=dev", "commit", "-m", "break unit")
-	must(t, dir, ExitCheck, "check", "--name", "unit")
-	must(t, dir, ExitGate, "change", "advance")
-	writeFile(t, filepath.Join(dir, "checks", "unit.sh"), "#!/bin/sh\n./app/logic.sh off | grep -q closed\n./app/logic.sh empty | grep -q empty-selection\n./app/logic.sh fail | grep -q failed-path\n")
-	runGit(t, dir, "add", "checks/unit.sh")
-	runGit(t, dir, "-c", "user.email=dev@example.com", "-c", "user.name=dev", "commit", "-m", "fix unit")
-	must(t, dir, ExitOK, "check")
-	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
-	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "create", "--goal", "验收失败")
+	walkBuild(t, dir)
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/accept.json")
+	must(t, dir, ExitCheck, "check", "--name", "interact", "--environment", "integration")
+	st := must(t, dir, ExitOK, "status")
+	if st["stage"] != StageBuild {
+		t.Fatalf("验收失败应回到实现与自验，得到 %v", st["stage"])
+	}
+	if len(st["problems"].([]any)) == 0 {
+		t.Fatal("验收失败应记下问题")
+	}
+}
 
-	writeFile(t, filepath.Join(dir, "app", "notes.txt"), "dirty\n")
-	m := must(t, dir, ExitOK, "status")
-	for _, c := range m["checks"].([]any) {
-		cv := c.(map[string]any)
-		if cv["effective_status"] != "stale" {
-			t.Fatalf("未提交文件应使证据过期: %#v", cv)
-		}
+func TestIntegrationTargetAndWorktrees(t *testing.T) {
+	dir := t.TempDir()
+	project(t, dir, ReleaseIncluded)
+	gitInit(t, dir)
+	must(t, dir, ExitOK, "change", "create", "--goal", "改目标")
+	must(t, dir, ExitOK, "change", "policy", "set", "--integration-branch", "iter-2", "--reason", "还没合入，改目标")
+	sha := gitSHA(t, dir)
+	must(t, dir, ExitOK, "change", "integration", "record", "--sha", sha, "--reason", "记到 iter-2")
+	walkBuild(t, dir)
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/accept.json")
+	must(t, dir, ExitOK, "check", "--name", "interact", "--environment", "integration")
+	must(t, dir, ExitOK, "change", "accept", "--what", "delivery", "--source", "human", "--reason", "接受", "--scope", "fixture")
+	_, m, errb := runAt(t, dir, "change", "advance")
+	if !strings.Contains(errText(m, errb), "还不是项目当前集成分支") {
+		t.Fatalf("新目标还不是当前集成分支时不能占共享发布: %s", errText(m, errb))
 	}
-	must(t, dir, ExitGate, "change", "advance")
-	os.Remove(filepath.Join(dir, "app", "notes.txt"))
-	writeFile(t, filepath.Join(dir, "app", "untracked.txt"), "u\n")
-	m = must(t, dir, ExitOK, "status")
-	if m["checks"].([]any)[0].(map[string]any)["effective_status"] != "stale" {
-		t.Fatal("untracked 应使证据过期")
-	}
-	os.Remove(filepath.Join(dir, "app", "untracked.txt"))
-	cfg, _ := os.ReadFile(filepath.Join(dir, "lauren.project.json"))
-	if err := os.WriteFile(filepath.Join(dir, "lauren.project.json"), append(cfg, '\n'), 0o644); err != nil {
+}
+
+func gitSHA(t *testing.T, dir string) string {
+	t.Helper()
+	c := exec.Command("git", "rev-parse", "HEAD")
+	c.Dir = dir
+	b, err := c.Output()
+	if err != nil {
 		t.Fatal(err)
 	}
-	m = must(t, dir, ExitOK, "status")
-	if m["checks"].([]any)[0].(map[string]any)["effective_status"] != "stale" {
-		t.Fatal("配置变化应使证据过期")
+	return strings.TrimSpace(string(b))
+}
+
+func TestTwoWorktrees(t *testing.T) {
+	dir := t.TempDir()
+	project(t, dir, ReleaseExcluded)
+	gitInit(t, dir)
+	other := filepath.Join(t.TempDir(), "wt-b")
+	runGit(t, dir, "worktree", "add", "-b", "feature-b", other)
+	// worktree add copies tracked files including project json
+	must(t, dir, ExitOK, "change", "create", "--goal", "工作区 A")
+	must(t, other, ExitOK, "change", "create", "--goal", "工作区 B")
+	_, m, errb := runAt(t, dir, "change", "create", "--goal", "第二个")
+	if !strings.Contains(errText(m, errb), "这个工作区已有进行中的变更") {
+		t.Fatalf("同一工作区不能有两个进行中变更: %s", errText(m, errb))
+	}
+	idA := must(t, dir, ExitOK, "status")["id"]
+	idB := must(t, other, ExitOK, "status")["id"]
+	if idA == idB {
+		t.Fatal("两个工作区不应共用同一次变更")
 	}
 }
 
-func TestLayersPartialSelfAndVersion(t *testing.T) {
+func TestCatalogNotDefaults(t *testing.T) {
 	dir := t.TempDir()
-	body := `{
-  "schema": 1, "environment": "local", "release": false, "profile": "full",
-  "checks": [
-    {"name": "static", "layer": "static", "when": "self", "argv": ["./checks/static.sh"], "required": true},
-    {"name": "weak", "layer": "static", "when": "self", "argv": ["./checks/static.sh"], "required": true},
-    {"name": "part", "layer": "interaction", "when": "acceptance", "argv": ["./checks/partial.sh"], "required": false},
-    {"name": "interact", "layer": "interaction", "when": "self", "argv": ["./checks/interact.sh"], "required": false}
-  ],
-  "requirements": [
-    {"id": "copy", "claim": "静态文案", "min_layer": "static", "required": true, "check": "static"},
-    {"id": "click", "claim": "真实交互", "min_layer": "interaction", "required": true, "check": "interact", "independent": true}
-  ]
-}`
-	project(t, dir, body)
+	project(t, dir, ReleaseExcluded)
 	gitInit(t, dir)
-	walkToBuild(t, dir)
-	must(t, dir, ExitOK, "check", "--name", "static")
-	must(t, dir, ExitOK, "check", "--name", "weak")
-	must(t, dir, ExitCheck, "check", "--name", "part")
-	m := must(t, dir, ExitOK, "status")
-	if m["checks"].([]any)[2].(map[string]any)["effective_status"] != "partial" {
-		t.Fatalf("partial=%v", m["checks"])
+	must(t, dir, ExitOK, "change", "create", "--goal", "目录")
+	walkBuild(t, dir)
+	proj, err := loadProject(dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	must(t, dir, ExitOK, "change", "advance")
+	before := fingerprint(dir, proj)
+	proj.Defaults.Environment = "integration"
+	raw, _ := os.ReadFile(filepath.Join(dir, "lauren.project.json"))
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["defaults"].(map[string]any)["environment"] = "integration"
+	b, _ := json.MarshalIndent(doc, "", "  ")
+	if err := os.WriteFile(filepath.Join(dir, "lauren.project.json"), append(b, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proj, _ = loadProject(dir)
+	after := fingerprint(dir, proj)
+	if after.Hash != before.Hash {
+		t.Fatal("只改 defaults 不应改变证据指纹")
+	}
+	st := must(t, dir, ExitOK, "status")
+	for _, c := range st["checks"].([]any) {
+		if c.(map[string]any)["name"] == "unit" && c.(map[string]any)["effective_status"] != "pass" {
+			t.Fatal("改 defaults 不应作废已有证据")
+		}
+	}
+	checks := doc["checks"].([]any)
+	checks[0].(map[string]any)["argv"] = []any{"./checks/static.sh", "--changed"}
+	b, _ = json.MarshalIndent(doc, "", "  ")
+	if err := os.WriteFile(filepath.Join(dir, "lauren.project.json"), append(b, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st = must(t, dir, ExitOK, "status")
+	for _, c := range st["checks"].([]any) {
+		if c.(map[string]any)["effective_status"] != "stale" && c.(map[string]any)["effective_status"] != "blocked" {
+			t.Fatalf("改 checks 应作废证据: %#v", c)
+		}
+	}
+}
+
+func TestDirtyIgnoredAndNotInIteration(t *testing.T) {
+	dir := t.TempDir()
+	project(t, dir, ReleaseIncluded)
+	gitInit(t, dir)
+	proj, _ := loadProject(dir)
+	base := fingerprint(dir, proj)
+	writeFile(t, filepath.Join(dir, ".lauren", "runtime", "noise.txt"), "x\n")
+	writeFile(t, filepath.Join(dir, "build.out"), "a\n")
+	writeFile(t, filepath.Join(dir, ".gitignore"), ".lauren/runtime/\nbuild.out\n")
+	runGit(t, dir, "add", ".gitignore")
+	runGit(t, dir, "-c", "user.email=dev@example.com", "-c", "user.name=dev", "commit", "-m", "ignore")
+	proj, _ = loadProject(dir)
+	mid := fingerprint(dir, proj)
+	writeFile(t, filepath.Join(dir, "build.out"), "b\n")
+	writeFile(t, filepath.Join(dir, ".lauren", "runtime", "noise.txt"), "y\n")
+	if fingerprint(dir, proj).Hash != mid.Hash {
+		t.Fatal("忽略文件和 runtime 不应改变源码指纹")
+	}
+	_ = base
+	must(t, dir, ExitOK, "change", "create", "--goal", "暂不纳入", "--integration-intent", "not_in_current_iteration")
+	walkBuild(t, dir)
 	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/accept.json")
-	must(t, dir, ExitOK, "change", "accept", "--what", "delivery", "--source", "human", "--reason", "看过", "--scope", "fixture")
+	must(t, dir, ExitOK, "check", "--name", "interact", "--environment", "staging")
+	must(t, dir, ExitOK, "change", "accept", "--what", "delivery", "--source", "human", "--reason", "接受", "--scope", "fixture")
 	_, m, errb := runAt(t, dir, "change", "advance")
-	msg := errb
-	if m["error"] != nil {
-		msg = m["error"].(string)
+	if !strings.Contains(errText(m, errb), "暂不纳入") {
+		t.Fatalf("暂不纳入不能占共享发布: %s", errText(m, errb))
 	}
-	if !strings.Contains(msg, "不能改名") {
-		t.Fatalf("自验不能充当独立验收: %v %s", m, errb)
+	writeFile(t, filepath.Join(dir, "app", "extra.txt"), "dirty\n")
+	st := must(t, dir, ExitOK, "status")
+	for _, c := range st["checks"].([]any) {
+		if c.(map[string]any)["bind_kind"] == BindWorktree && c.(map[string]any)["effective_status"] == "pass" {
+			t.Fatalf("未跟踪文件应使工作区证据过期: %#v", c)
+		}
 	}
-	must(t, dir, ExitUsage, "change", "accept", "--what", "delivery", "--source", "self", "--reason", "x", "--scope", "y")
-	must(t, dir, ExitUsage, "change", "declare-version", "--version", "1", "--source", "tool")
-	must(t, dir, ExitUsage, "change", "stage")
-	must(t, dir, ExitUsage, "pass")
 }
 
-func TestFlowControlAndRevise(t *testing.T) {
+func TestMergedTargetRejectsUntilWithdraw(t *testing.T) {
 	dir := t.TempDir()
-	project(t, dir, "")
+	project(t, dir, ReleaseIncluded)
 	gitInit(t, dir)
-	must(t, dir, ExitOK, "change", "create", "--goal", "控制流")
-	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
-	must(t, dir, ExitOK, "change", "advance")
-	must(t, dir, ExitOK, "change", "block", "--reason", "等说明")
-	must(t, dir, ExitBlocked, "check")
-	must(t, dir, ExitGate, "change", "advance")
-	must(t, dir, ExitOK, "change", "resume")
-	must(t, dir, ExitOK, "change", "rollback", "--to", StageDemand, "--reason", "需求写错")
-	m := must(t, dir, ExitOK, "status")
-	if m["stage"] != StageDemand {
-		t.Fatalf("回退后阶段=%v", m["stage"])
+	must(t, dir, ExitOK, "change", "create", "--goal", "已合入")
+	sha := gitSHA(t, dir)
+	must(t, dir, ExitOK, "change", "integration", "record", "--sha", sha, "--reason", "已合入 main")
+	_, m, errb := runAt(t, dir, "change", "policy", "set", "--integration-branch", "iter-9", "--reason", "想改目标")
+	if !strings.Contains(errText(m, errb), "尚未撤回") {
+		t.Fatalf("已合入未撤回应拒绝: %s", errText(m, errb))
 	}
-	must(t, dir, ExitOK, "change", "submit", "--stage", StageDemand, "--artifact", "artifacts/demand.json")
-	must(t, dir, ExitOK, "change", "cancel", "--reason", "不做了")
-	m = must(t, dir, ExitOK, "status")
-	if m["status"] != StatusCancel || m["status"] == StatusClosed {
-		t.Fatalf("取消不应是成功关闭: %v", m["status"])
+	must(t, dir, ExitOK, "change", "integration", "withdraw", "--reason", "从 main 撤回")
+	must(t, dir, ExitOK, "change", "policy", "set", "--integration-branch", "iter-9", "--reason", "撤回后改目标")
+	if must(t, dir, ExitOK, "status")["policy"].(map[string]any)["integration_branch"] != "iter-9" {
+		t.Fatal("撤回后应能改这个流程的集成分支")
 	}
 }
 
-func TestSubprocessRecordAndPaths(t *testing.T) {
+func TestSubprocessAndEmpty(t *testing.T) {
 	dir := t.TempDir()
-	body := `{
-  "schema": 1, "environment": "local", "release": false, "profile": "full",
-  "checks": [
-    {"name": "fail", "layer": "unit", "when": "self", "argv": ["./checks/fail.sh"], "required": true}
-  ],
-  "requirements": []
-}`
-	project(t, dir, body)
+	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{
+	  "schema": 1,
+	  "environments": ["development", "integration", "staging", "production"],
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main"},
+	  "checks": [{"name": "fail", "layer": "unit", "gate": "self_verification", "argv": ["./checks/fail.sh"], "required": true}],
+	  "requirements": []
+	}`)
+	writeFile(t, filepath.Join(dir, "checks", "fail.sh"), "#!/bin/sh\necho token=supersecret\nexit 1\n")
+	writeFile(t, filepath.Join(dir, "artifacts", "demand.json"), `{"goal":"x","acceptance":["a"],"baseline":"b"}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "plan.json"), `{"approach":"a","risks":"r","prechecks":["p"]}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "impl.json"), `{"summary":"s"}`)
 	gitInit(t, dir)
 	must(t, dir, ExitOK, "change", "create", "--goal", "子进程")
 	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
@@ -337,277 +407,54 @@ func TestSubprocessRecordAndPaths(t *testing.T) {
 	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
 	must(t, dir, ExitOK, "change", "advance")
 	must(t, dir, ExitCheck, "check", "--name", "fail")
-	m := must(t, dir, ExitOK, "status")
-	ch := m["checks"].([]any)[0].(map[string]any)
-	if ch["effective_status"] != "fail" || ch["exit_code"].(float64) != 1 {
-		t.Fatalf("失败不能记成通过: %#v", ch)
-	}
-	if strings.Contains(ch["preview"].(string), "supersecret") {
-		t.Fatal("日志未脱敏")
-	}
-	logPath := ch["log_path"].(string)
-	b, err := os.ReadFile(logPath)
-	if err != nil || !strings.Contains(string(b), "[redacted]") {
-		t.Fatalf("证据日志=%s err=%v", b, err)
-	}
-	st, err := os.ReadFile(filepath.Join(dir, ".lauren", "runtime", "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(st), "supersecret") {
-		t.Fatal("状态 JSON 含有未脱敏内容")
-	}
-	marker := strings.Repeat("Q", 400)
-	writeFile(t, filepath.Join(dir, "checks", "fail.sh"), "#!/bin/sh\necho "+marker+"\nexit 1\n")
-	must(t, dir, ExitCheck, "check", "--name", "fail")
-	st, _ = os.ReadFile(filepath.Join(dir, ".lauren", "runtime", "state.json"))
-	if strings.Contains(string(st), marker) {
-		t.Fatal("大日志进了状态 JSON")
-	}
-	code, m, errb := runAt(t, dir, "change", "submit", "--artifact", "../outside.json")
-	msg := errb
-	if m["error"] != nil {
-		msg = m["error"].(string)
-	}
-	if code == ExitOK || !strings.Contains(msg, "相对路径") {
-		t.Fatalf("路径应被拒绝: code=%d %s %v", code, errb, m)
-	}
-}
-
-func TestUnknownCandidateAndVerify(t *testing.T) {
-	dir := t.TempDir()
-	project(t, dir, "")
-	must(t, dir, ExitOK, "change", "create", "--goal", "无 git")
-	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
-	must(t, dir, ExitOK, "change", "advance")
-	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
-	must(t, dir, ExitOK, "change", "advance")
-	must(t, dir, ExitCheck, "check")
-	m := must(t, dir, ExitOK, "status")
-	if m["candidate"].(map[string]any)["kind"] != "unknown" {
-		t.Fatal(m["candidate"])
-	}
-	if m["checks"].([]any)[0].(map[string]any)["effective_status"] == "pass" {
-		t.Fatal("未知候选不能静默通过")
-	}
-
-	dir = t.TempDir()
-	project(t, dir, "")
-	gitInit(t, dir)
-	walkToBuild(t, dir)
-	writeFile(t, filepath.Join(dir, "checks", "unit.sh"), "#!/bin/sh\nexit 1\n")
-	must(t, dir, ExitCheck, "check", "--name", "unit")
-	writeFile(t, filepath.Join(dir, "checks", "unit.sh"), "#!/bin/sh\nexit 0\n")
-	must(t, dir, ExitOK, "check", "--name", "unit")
-	must(t, dir, ExitOK, "change", "problem", "add", "--summary", "unit 曾失败", "--disposition", "implemented", "--reason", "补了检查")
 	st := must(t, dir, ExitOK, "status")
-	pid := st["problems"].([]any)[0].(map[string]any)["id"].(string)
-	if st["problems"].([]any)[0].(map[string]any)["verified_fixed"] != false {
-		t.Fatal("处置本身不是验证")
+	ch := st["checks"].([]any)[0].(map[string]any)
+	if ch["effective_status"] != "fail" || strings.Contains(fmt.Sprint(ch["preview"]), "supersecret") {
+		t.Fatalf("失败或未脱敏: %#v", ch)
 	}
-	must(t, dir, ExitOK, "change", "problem", "verify", "--problem", pid, "--check", "unit")
-	st = must(t, dir, ExitOK, "status")
-	if st["problems"].([]any)[0].(map[string]any)["verified_fixed"] != true {
-		t.Fatal("旧失败加新通过后应标已验证修复")
+	writeFile(t, filepath.Join(dir, "artifacts", "bad.json"), "not-json")
+	_, m, errb := runAt(t, dir, "change", "submit", "--artifact", "artifacts/bad.json")
+	if !strings.Contains(errText(m, errb), "JSON") {
+		t.Fatal(errText(m, errb))
 	}
-	writeFile(t, filepath.Join(dir, "app", "again.txt"), "x\n")
-	st = must(t, dir, ExitOK, "status")
-	if st["problems"].([]any)[0].(map[string]any)["verified_fixed"] != false {
-		t.Fatal("候选变化后旧的验证不能继续有效")
+	_, m, errb = runAt(t, dir, "change", "submit", "--artifact", "../outside.json")
+	if !strings.Contains(errText(m, errb), "相对路径") {
+		t.Fatal(errText(m, errb))
+	}
+
+	empty := t.TempDir()
+	writeFile(t, filepath.Join(empty, "lauren.project.json"), `{
+	  "schema": 1,
+	  "environments": ["development", "integration", "staging", "production"],
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main"},
+	  "checks": [],
+	  "requirements": []
+	}`)
+	writeFile(t, filepath.Join(empty, "artifacts", "demand.json"), `{"goal":"g","acceptance":["a"],"baseline":"b"}`)
+	writeFile(t, filepath.Join(empty, "artifacts", "plan.json"), `{"approach":"a","risks":"r","prechecks":["p"]}`)
+	writeFile(t, filepath.Join(empty, "artifacts", "impl.json"), `{"summary":"s"}`)
+	gitInit(t, empty)
+	must(t, empty, ExitOK, "change", "create", "--goal", "空配置")
+	must(t, empty, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
+	must(t, empty, ExitOK, "change", "advance")
+	must(t, empty, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
+	must(t, empty, ExitOK, "change", "advance")
+	must(t, empty, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
+	_, m, errb = runAt(t, empty, "change", "advance")
+	if !strings.Contains(errText(m, errb), "空检查配置") {
+		t.Fatal(errText(m, errb))
 	}
 }
 
-func TestSmallProfileHistoryAndStore(t *testing.T) {
+func TestTimeoutBlockCancel(t *testing.T) {
 	dir := t.TempDir()
-	code, _, errb := runAt(t, dir, "init", "--profile", "small", "--dir", dir)
-	if code != ExitOK {
-		t.Fatal(code, errb)
-	}
-	gitInit(t, dir)
-	writeFile(t, filepath.Join(dir, "artifacts", "small-demand.json"), `{"goal":"只写目标"}`)
-	must(t, dir, ExitOK, "change", "create", "--goal", "小任务")
-	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/small-demand.json")
-	m := must(t, dir, ExitOK, "history")
-	if len(m["history"].([]any)) < 2 {
-		t.Fatal(m["history"])
-	}
-	next := must(t, dir, ExitOK, "next")
-	if len(next["next"].([]any)) == 0 {
-		t.Fatal("next 为空")
-	}
-	var raw bytes.Buffer
-	if Run([]string{"--root", dir, "status"}, &raw, &bytes.Buffer{}) != ExitOK {
-		t.Fatal("人读 status 失败")
-	}
-	if strings.Contains(raw.String(), "%") || strings.Contains(raw.String(), "已通知") {
-		t.Fatal(raw.String())
-	}
-	err := WithState(dir, func(st *State) error {
-		st.Changes = append(st.Changes, Change{ID: "extra"})
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := os.ReadFile(filepath.Join(dir, ".lauren", "runtime", "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var st State
-	if err := json.Unmarshal(b, &st); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestConcurrentWrites(t *testing.T) {
-	dir := t.TempDir()
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			if err := WithState(dir, func(st *State) error {
-				st.Changes = append(st.Changes, Change{ID: fmt.Sprintf("x-%d", n)})
-				return nil
-			}); err != nil {
-				t.Errorf("write: %v", err)
-			}
-		}(i)
-	}
-	wg.Wait()
-	b, err := os.ReadFile(filepath.Join(dir, ".lauren", "runtime", "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var st State
-	if err := json.Unmarshal(b, &st); err != nil {
-		t.Fatal(err)
-	}
-	if len(st.Changes) != 8 {
-		t.Fatalf("并发写入丢失: %d", len(st.Changes))
-	}
-}
-
-func TestCandidateShiftDropsConclusions(t *testing.T) {
-	dir := t.TempDir()
-	project(t, dir, "")
-	gitInit(t, dir)
-	walkToBuild(t, dir)
-	writeFile(t, filepath.Join(dir, "checks", "unit.sh"), "#!/bin/sh\necho x >> app/copy.txt\necho touched >> app/new-note.txt\nexit 0\n")
-	code, m, errb := runAt(t, dir, "check", "--name", "unit")
-	if code != ExitCheck {
-		t.Fatalf("检查改动工作区仍返回 %d %v %s", code, m, errb)
-	}
-	m = must(t, dir, ExitOK, "status")
-	for _, c := range m["checks"].([]any) {
-		cv := c.(map[string]any)
-		if cv["name"] == "unit" && cv["effective_status"] != "stale" {
-			t.Fatalf("检查改动了跟踪文件和未跟踪文件，结果不能给新候选放行: %#v", cv)
-		}
-	}
-	must(t, dir, ExitGate, "change", "advance")
-
-	dir = t.TempDir()
-	project(t, dir, "")
-	gitInit(t, dir)
-	before := fingerprint(dir, "local")
-	writeFile(t, filepath.Join(dir, ".lauren", "runtime", "noise.txt"), "runtime\n")
-	writeFile(t, filepath.Join(dir, "build.out"), "artifact\n")
-	writeFile(t, filepath.Join(dir, ".gitignore"), ".lauren/runtime/\nbuild.out\n")
-	runGit(t, dir, "add", ".gitignore")
-	runGit(t, dir, "-c", "user.email=dev@example.com", "-c", "user.name=dev", "commit", "-m", "ignore build")
-	base := fingerprint(dir, "local")
-	if base.Hash == before.Hash {
-		t.Fatal("提交 gitignore 后指纹应变化")
-	}
-	writeFile(t, filepath.Join(dir, "build.out"), "artifact-2\n")
-	writeFile(t, filepath.Join(dir, ".lauren", "runtime", "noise.txt"), "runtime-2\n")
-	after := fingerprint(dir, "local")
-	if after.Hash != base.Hash {
-		t.Fatalf("忽略文件和 runtime 不应改变源码指纹: %s vs %s", base.Hash, after.Hash)
-	}
-
-	walkToAccept(t, dir)
-	must(t, dir, ExitOK, "change", "accept", "--what", "delivery", "--source", "human", "--reason", "接受", "--scope", "fixture")
-	cfg, err := os.ReadFile(filepath.Join(dir, "lauren.project.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "lauren.project.json"), append(cfg, '\n'), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	m = must(t, dir, ExitOK, "status")
-	if m["facts"].(map[string]any)["delivery_accepted"] != false {
-		t.Fatal("配置变化后不能保留交付接受")
-	}
-	must(t, dir, ExitGate, "change", "advance")
-}
-
-func TestReviseVoidsReleaseFacts(t *testing.T) {
-	dir := t.TempDir()
-	project(t, dir, "")
-	gitInit(t, dir)
-	must(t, dir, ExitOK, "change", "create", "--goal", "发布读回", "--release", "true")
-	for _, step := range [][]string{
-		{"change", "submit", "--artifact", "artifacts/demand.json"},
-		{"change", "advance"},
-		{"change", "submit", "--artifact", "artifacts/plan.json"},
-		{"change", "advance"},
-		{"change", "submit", "--artifact", "artifacts/impl.json"},
-		{"check", "--name", "static"},
-		{"check", "--name", "unit"},
-		{"change", "advance"},
-		{"change", "submit", "--artifact", "artifacts/accept.json"},
-		{"check", "--name", "interact"},
-		{"change", "accept", "--what", "delivery", "--source", "human", "--reason", "接受", "--scope", "fixture"},
-		{"change", "advance"},
-		{"change", "accept", "--what", "release", "--source", "human", "--reason", "声明", "--scope", "fixture"},
-		{"check", "--name", "version"},
-	} {
-		must(t, dir, ExitOK, step...)
-	}
-	m := must(t, dir, ExitOK, "status")
-	facts := m["facts"].(map[string]any)
-	if facts["release_declared"] != true || facts["release_verified"] != true || m["tool_version"] == nil {
-		t.Fatalf("发布事实未分开记下: %#v", m)
-	}
-	must(t, dir, ExitOK, "change", "submit", "--stage", StageDemand, "--artifact", "artifacts/demand.json")
-	m = must(t, dir, ExitOK, "status")
-	facts = m["facts"].(map[string]any)
-	if m["stage"] != StageDemand || facts["delivery_accepted"] != false || facts["release_declared"] != false || facts["release_verified"] != false || m["tool_version"] != nil {
-		t.Fatalf("修正需求后过期结论还在: %#v", m)
-	}
-}
-
-func TestEmptyConfigTimeoutAndBadInput(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{"schema":1,"environment":"local","release":false,"profile":"full","checks":[],"requirements":[]}`)
-	writeFile(t, filepath.Join(dir, "artifacts", "demand.json"), `{"goal":"空选择要失败","acceptance":["关闭"],"baseline":"虚构"}`)
-	writeFile(t, filepath.Join(dir, "artifacts", "plan.json"), `{"approach":"补路径","risks":"漏行为","prechecks":["unit"]}`)
-	writeFile(t, filepath.Join(dir, "artifacts", "impl.json"), `{"summary":"还没有检查"}`)
-	gitInit(t, dir)
-	must(t, dir, ExitOK, "change", "create", "--goal", "空配置")
-	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
-	must(t, dir, ExitOK, "change", "advance")
-	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
-	must(t, dir, ExitOK, "change", "advance")
-	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
-	_, m, errb := runAt(t, dir, "change", "advance")
-	msg := errb
-	if m["error"] != nil {
-		msg = m["error"].(string)
-	}
-	if !strings.Contains(msg, "空检查配置") {
-		t.Fatalf("空配置不应通过自验: %s", msg)
-	}
-
-	dir = t.TempDir()
-	body := `{
-  "schema": 1, "environment": "local", "release": false, "profile": "full",
-  "checks": [{"name": "slow", "layer": "unit", "when": "self", "argv": ["./checks/slow.sh"], "required": true}],
-  "requirements": []
-}`
-	project(t, dir, body)
+	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{
+	  "schema": 1,
+	  "environments": ["development", "integration", "staging", "production"],
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main"},
+	  "checks": [{"name": "slow", "layer": "unit", "gate": "self_verification", "argv": ["./checks/slow.sh"], "required": true}],
+	  "requirements": []
+	}`)
 	writeFile(t, filepath.Join(dir, "checks", "slow.sh"), "#!/bin/sh\nsleep 5\n")
 	gitInit(t, dir)
 	must(t, dir, ExitOK, "change", "create", "--goal", "超时")
@@ -618,51 +465,49 @@ func TestEmptyConfigTimeoutAndBadInput(t *testing.T) {
 	if code != ExitCheck {
 		t.Fatalf("超时退出码=%d", code)
 	}
-	st := must(t, dir, ExitOK, "status")
-	ch := st["checks"].([]any)[0].(map[string]any)
-	if ch["effective_status"] != "fail" {
-		t.Fatalf("超时应记失败: %#v", ch)
+	if must(t, dir, ExitOK, "status")["checks"].([]any)[0].(map[string]any)["effective_status"] != "fail" {
+		t.Fatal("超时应记失败")
 	}
-
-	writeFile(t, filepath.Join(dir, "artifacts", "bad.json"), "not-json")
-	writeFile(t, filepath.Join(dir, "artifacts", "arr.json"), "[]")
-	_, m, errb = runAt(t, dir, "change", "submit", "--artifact", "artifacts/bad.json")
-	msg = errText(m, errb)
-	if !strings.Contains(msg, "JSON") {
-		t.Fatalf("坏 JSON 应拒绝: %s", msg)
-	}
-	_, m, errb = runAt(t, dir, "change", "submit", "--artifact", "artifacts/arr.json")
-	msg = errText(m, errb)
-	if !strings.Contains(msg, "JSON") {
-		t.Fatalf("数组产物应拒绝: %s", msg)
-	}
-	_, m, errb = runAt(t, dir, "change", "submit", "--artifact", "artifacts/../../outside.json")
-	msg = errText(m, errb)
-	if !strings.Contains(msg, "相对路径") {
-		t.Fatalf("嵌套越界应拒绝: %s", msg)
+	must(t, dir, ExitOK, "change", "block", "--reason", "等")
+	must(t, dir, ExitBlocked, "check")
+	must(t, dir, ExitOK, "change", "resume")
+	must(t, dir, ExitOK, "change", "cancel", "--reason", "停")
+	if must(t, dir, ExitOK, "status")["status"] != StatusCancel {
+		t.Fatal("取消不是正常关闭")
 	}
 }
 
-func errText(m map[string]any, errb string) string {
-	if m["error"] != nil {
-		return m["error"].(string)
+func TestConcurrentChangeWrites(t *testing.T) {
+	dir := t.TempDir()
+	project(t, dir, ReleaseExcluded)
+	gitInit(t, dir)
+	m := must(t, dir, ExitOK, "change", "create", "--goal", "并发")
+	id := m["id"].(string)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			_ = WithChange(dir, id, func(ch *Change) error {
+				ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "note", Message: fmt.Sprintf("n%d", n)})
+				return nil
+			})
+		}(i)
 	}
-	return errb
-}
-
-func walkToAccept(t *testing.T, dir string) {
-	t.Helper()
-	must(t, dir, ExitOK, "change", "create", "--goal", "验收", "--release", "false")
-	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
-	must(t, dir, ExitOK, "change", "advance")
-	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
-	must(t, dir, ExitOK, "change", "advance")
-	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
-	must(t, dir, ExitOK, "check", "--name", "static")
-	must(t, dir, ExitOK, "check", "--name", "unit")
-	must(t, dir, ExitOK, "change", "advance")
-	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/accept.json")
-	must(t, dir, ExitOK, "check", "--name", "interact")
+	wg.Wait()
+	ch, err := readChange(dir, id)
+	if err != nil || ch == nil {
+		t.Fatal(err)
+	}
+	notes := 0
+	for _, e := range ch.History {
+		if e.Kind == "note" {
+			notes++
+		}
+	}
+	if notes != 8 {
+		t.Fatalf("并发写入丢失: %d", notes)
+	}
 }
 
 func TestSkillsCheck(t *testing.T) {

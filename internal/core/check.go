@@ -23,26 +23,34 @@ func redact(s string) string {
 	return s
 }
 
-func runCheck(root string, spec CheckSpec, fp Fingerprint, gen int) CheckRun {
+func runCheck(root, changeID string, spec CheckSpec, fp Fingerprint, gen int, env, integrationBranch, integrationSHA string) CheckRun {
 	now := time.Now().UTC()
-	run := CheckRun{
-		ID:            newID("r-"),
-		Name:          spec.Name,
-		Layer:         spec.Layer,
-		When:          spec.When,
-		Argv:          append([]string{}, spec.Argv...),
-		Cwd:           root,
-		Started:       now,
-		Ended:         now,
-		Fingerprint:   fp.Hash,
-		Generation:    gen,
-		CandidateKind: fp.Kind,
-		Status:        "blocked",
+	bind := BindWorktree
+	if spec.Layer == "release_readback" || spec.Gate == GateRelease {
+		bind = BindIntegration
 	}
-	if fp.Kind != "ok" {
-		run.Note = fp.Note
-		run.Ended = time.Now().UTC()
-		return run
+	run := CheckRun{
+		ID: newID("r-"), Name: spec.Name, Layer: spec.Layer, Gate: spec.Gate,
+		Argv: append([]string{}, spec.Argv...), Cwd: root, Environment: env,
+		Started: now, Ended: now, EvidenceGeneration: gen, BindKind: bind,
+		Status: "blocked", CandidateKind: fp.Kind,
+	}
+	if bind == BindWorktree {
+		run.Fingerprint = fp.Hash
+		if fp.Kind != "ok" {
+			run.Note = fp.Note
+			run.Ended = time.Now().UTC()
+			return run
+		}
+	} else {
+		run.CandidateKind = "ok"
+		run.IntegrationBranch = integrationBranch
+		run.IntegrationSHA = integrationSHA
+		if integrationSHA == "" {
+			run.Note = "发布读回必须绑到已记录的集成 SHA，不能用未合入的工作区候选"
+			run.Ended = time.Now().UTC()
+			return run
+		}
 	}
 	if len(spec.Argv) == 0 || strings.Contains(spec.Argv[0], "..") {
 		run.Status = "fail"
@@ -66,7 +74,7 @@ func runCheck(root string, spec CheckSpec, fp Fingerprint, gen int) CheckRun {
 	if len(raw) > 1<<20 {
 		raw = raw[:1<<20] + "\n[truncated]\n"
 	}
-	evDir := filepath.Join(runtimeDir(root), "evidence")
+	evDir := filepath.Join(changeDir(root, changeID), "evidence")
 	_ = os.MkdirAll(evDir, 0o755)
 	logPath := filepath.Join(evDir, run.ID+".log")
 	_ = os.WriteFile(logPath, []byte(raw), 0o644)

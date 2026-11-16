@@ -1,13 +1,17 @@
 {
   "schema": 1,
-  "environment": "local",
-  "release": true,
-  "profile": "full",
+  "environments": ["development", "integration", "staging", "production"],
+  "defaults": {
+    "environment": "development",
+    "release_stage": "included",
+    "artifact_level": "standard",
+    "integration_branch": "main"
+  },
   "checks": [
-    {"name": "static", "layer": "static", "when": "self", "argv": ["./checks/static.sh"], "required": true},
-    {"name": "unit", "layer": "unit", "when": "self", "argv": ["./checks/unit.sh"], "required": true},
-    {"name": "interact", "layer": "interaction", "when": "acceptance", "argv": ["./checks/interact.sh"], "required": true},
-    {"name": "version", "layer": "release-readback", "when": "release", "argv": ["./checks/read-version.sh"], "required": true}
+    {"name": "static", "layer": "static", "gate": "self_verification", "argv": ["./checks/static.sh"], "required": true, "environments": ["development", "integration"]},
+    {"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/unit.sh"], "required": true, "environments": ["development", "integration"]},
+    {"name": "interact", "layer": "interaction", "gate": "acceptance", "argv": ["./checks/interact.sh"], "required": true, "environments": ["integration", "staging"]},
+    {"name": "version", "layer": "release_readback", "gate": "release", "argv": ["./checks/read-version.sh"], "required": true, "environments": ["staging", "production"]}
   ],
   "requirements": [
     {"id": "copy", "claim": "文案含空列表说明", "min_layer": "static", "required": true, "check": "static"},

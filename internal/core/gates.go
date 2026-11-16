@@ -9,6 +9,19 @@ import (
 	"time"
 )
 
+func (c *Change) syncCatalog(proj Project) {
+	h := catalogHash(proj)
+	if c.CatalogHash == "" {
+		c.CatalogHash = h
+		return
+	}
+	if c.CatalogHash != h {
+		c.CatalogHash = h
+		c.invalidateEvidence()
+		c.History = append(c.History, Event{At: time.Now().UTC(), Kind: "catalog", Message: "checks 或 requirements 变了，已有证据作废"})
+	}
+}
+
 func (c *Change) artifact(stage string) *Artifact {
 	for i := range c.Artifacts {
 		if c.Artifacts[i].Stage == stage {
@@ -46,53 +59,87 @@ func (c *Change) addArtifact(stage string, body []byte) {
 	c.Artifacts = append(c.Artifacts, Artifact{Stage: stage, Revisions: []ArtifactRev{rev}})
 }
 
+func (c *Change) voidConclusions() {
+	for i := range c.Accepts {
+		c.Accepts[i].Voided = true
+	}
+	c.DeclaredVersion = nil
+}
+
+func (c *Change) invalidateEvidence() {
+	c.EvidenceGeneration++
+	c.voidConclusions()
+}
+
 func (c *Change) effective(run CheckRun, fp Fingerprint) string {
-	if run.CandidateKind != "ok" || run.Status == "blocked" {
+	if run.Status == "blocked" {
 		return "blocked"
 	}
-	if run.Generation != c.Generation || run.Fingerprint != fp.Hash || fp.Kind != "ok" {
+	if run.BindKind == BindIntegration {
+		if c.Merge == nil || c.Merge.Withdrawn || c.Merge.SHA != run.IntegrationSHA || c.Merge.Branch != run.IntegrationBranch {
+			return "stale"
+		}
+		if run.EvidenceGeneration != c.EvidenceGeneration {
+			return "stale"
+		}
+		return run.Status
+	}
+	if run.CandidateKind != "ok" {
+		return "blocked"
+	}
+	if run.EvidenceGeneration != c.EvidenceGeneration || fp.Kind != "ok" || run.Fingerprint != fp.Hash {
 		return "stale"
 	}
 	return run.Status
 }
 
-func (c *Change) latestRun(name string) *CheckRun {
-	var found *CheckRun
-	for i := range c.Runs {
-		if c.Runs[i].Name == name {
-			found = &c.Runs[i]
+func envAccepted(spec CheckSpec, proj Project, env string) bool {
+	if spec.Layer == "release_readback" || spec.Gate == GateRelease {
+		allowed := spec.Environments
+		if len(allowed) == 0 {
+			allowed = []string{"staging", "production"}
 		}
+		return containsStr(allowed, env)
 	}
-	return found
+	if len(spec.Environments) > 0 {
+		return containsStr(spec.Environments, env)
+	}
+	return containsStr(proj.Environments, env)
 }
 
-func (c *Change) liveAccept(what string, fp Fingerprint) *Accept {
-	if fp.Kind != "ok" {
-		return nil
+func (c *Change) satisfying(spec CheckSpec, proj Project, fp Fingerprint) (*CheckRun, string) {
+	var found *CheckRun
+	for i := range c.Runs {
+		r := &c.Runs[i]
+		if r.Name != spec.Name || r.Status != "pass" {
+			continue
+		}
+		if c.effective(*r, fp) != "pass" {
+			continue
+		}
+		if !envAccepted(spec, proj, r.Environment) {
+			continue
+		}
+		found = r
 	}
+	if found == nil {
+		return nil, spec.Name + " 没有仍有效、且环境被接受的通过记录"
+	}
+	return found, ""
+}
+
+func (c *Change) liveAccept(what, bindKind, key string) *Accept {
 	var found *Accept
 	for i := range c.Accepts {
 		a := &c.Accepts[i]
-		if a.What == what && !a.Voided && a.Generation == c.Generation && a.Fingerprint == fp.Hash {
+		if a.What == what && !a.Voided && a.BindKind == bindKind && a.Fingerprint == key {
 			found = a
 		}
 	}
 	return found
 }
 
-func (v *VersionFact) current(gen int, fp Fingerprint) bool {
-	return v != nil && fp.Kind == "ok" && v.Generation == gen && v.Fingerprint == fp.Hash
-}
-
-func (c *Change) voidDownstream() {
-	c.Generation++
-	for i := range c.Accepts {
-		c.Accepts[i].Voided = true
-	}
-	c.ToolVersion = nil
-}
-
-func validateArtifact(stage, profile string, m map[string]any) error {
+func validateArtifact(stage, level string, m map[string]any) error {
 	need := func(keys ...string) error {
 		for _, k := range keys {
 			v, ok := m[k]
@@ -114,15 +161,15 @@ func validateArtifact(stage, profile string, m map[string]any) error {
 		}
 		return nil
 	}
-	small := profile == "small"
+	short := level == LevelAbbreviated
 	switch stage {
 	case StageDemand:
-		if small {
+		if short {
 			return need("goal")
 		}
 		return need("goal", "acceptance", "baseline")
 	case StagePlan:
-		if small {
+		if short {
 			return need("approach")
 		}
 		return need("approach", "risks", "prechecks")
@@ -145,16 +192,11 @@ func (c *Change) requirementMet(req Requirement, proj Project, fp Fingerprint) (
 	if layerRank[spec.Layer] < layerRank[req.MinLayer] {
 		return false, "检查 " + spec.Name + " 的层次 " + spec.Layer + " 低于要求 " + req.MinLayer
 	}
-	if req.Independent && spec.When == "self" {
+	if req.Independent && spec.Gate == GateSelf {
 		return false, "要求 " + req.ID + " 需要独立验收来源，自验检查 " + spec.Name + " 不能改名充当"
 	}
-	run := c.latestRun(spec.Name)
-	if run == nil {
-		return false, "检查 " + spec.Name + " 未运行"
-	}
-	eff := c.effective(*run, fp)
-	if eff != "pass" {
-		return false, "检查 " + spec.Name + " 的有效结果是 " + eff
+	if _, why := c.satisfying(*spec, proj, fp); why != "" {
+		return false, why
 	}
 	return true, ""
 }
@@ -168,33 +210,21 @@ func findCheck(p Project, name string) *CheckSpec {
 	return nil
 }
 
-func (c *Change) checksOf(p Project, when string) []CheckSpec {
-	var out []CheckSpec
-	for _, ch := range p.Checks {
-		if ch.When == when {
-			out = append(out, ch)
-		}
-	}
-	return out
-}
-
-func (c *Change) requiredFresh(p Project, when string, fp Fingerprint) []string {
+func (c *Change) requiredFresh(p Project, gate string, fp Fingerprint) []string {
 	var bad []string
-	for _, ch := range c.checksOf(p, when) {
-		if !ch.Required {
+	for _, ch := range p.Checks {
+		if ch.Gate != gate || !ch.Required {
 			continue
 		}
-		run := c.latestRun(ch.Name)
-		if run == nil {
-			bad = append(bad, ch.Name+" 未运行")
-			continue
-		}
-		eff := c.effective(*run, fp)
-		if eff != "pass" {
-			bad = append(bad, ch.Name+" 为 "+eff)
+		if _, why := c.satisfying(ch, p, fp); why != "" {
+			bad = append(bad, why)
 		}
 	}
 	return bad
+}
+
+func (c *Change) mergedNow() bool {
+	return c.Merge != nil && !c.Merge.Withdrawn && c.Merge.Branch == c.Policy.IntegrationBranch && c.Policy.IntegrationIntent == IntentBranch
 }
 
 func (c *Change) gate(p Project, fp Fingerprint) (string, []string) {
@@ -207,8 +237,12 @@ func (c *Change) gate(p Project, fp Fingerprint) (string, []string) {
 	if c.Status == StatusBlocked {
 		return "", []string{"变更被阻塞：" + c.Block.Reason}
 	}
-	if _, ok := c.latestBody(c.Stage); !ok {
+	body, ok := c.latestBody(c.Stage)
+	if !ok {
 		return "", []string{"当前阶段「" + c.Stage + "」还没有产物"}
+	}
+	if err := validateArtifact(c.Stage, c.Policy.ArtifactLevel, body); err != nil {
+		return "", []string{err.Error()}
 	}
 	switch c.Stage {
 	case StageDemand:
@@ -219,10 +253,10 @@ func (c *Change) gate(p Project, fp Fingerprint) (string, []string) {
 		if fp.Kind != "ok" {
 			return "", []string{fp.Note}
 		}
-		if !hasRequiredCheck(p, "self") {
+		if !hasRequiredCheck(p, GateSelf) {
 			return "", []string{"没有配置必过的自验检查。空检查配置不能通过实现与自验"}
 		}
-		bad := c.requiredFresh(p, "self", fp)
+		bad := c.requiredFresh(p, GateSelf, fp)
 		if len(bad) > 0 {
 			return "", bad
 		}
@@ -232,10 +266,10 @@ func (c *Change) gate(p Project, fp Fingerprint) (string, []string) {
 			return "", []string{fp.Note}
 		}
 		var bad []string
-		if !hasRequiredCheck(p, "acceptance") && !hasRequiredRequirement(p) {
+		if !hasRequiredCheck(p, GateAcceptance) && !hasRequiredRequirement(p) {
 			bad = append(bad, "没有配置必过的验收检查或验收要求。空配置不能通过验收与交付")
 		}
-		bad = append(bad, c.requiredFresh(p, "acceptance", fp)...)
+		bad = append(bad, c.requiredFresh(p, GateAcceptance, fp)...)
 		for _, req := range p.Requirements {
 			if !req.Required {
 				continue
@@ -245,21 +279,33 @@ func (c *Change) gate(p Project, fp Fingerprint) (string, []string) {
 				bad = append(bad, why)
 			}
 		}
-		if c.liveAccept("delivery", fp) == nil {
+		if c.liveAccept("delivery", BindWorktree, fp.Hash) == nil {
 			bad = append(bad, "交付尚未被接受。检查通过不等于交付接受")
 		}
 		if len(bad) > 0 {
 			return "", bad
 		}
-		if c.Release {
-			return StageRelease, nil
+		if c.Policy.ReleaseStage == ReleaseExcluded {
+			return StageRetro, nil
 		}
-		return StageRetro, nil
+		if c.Policy.IntegrationIntent != IntentBranch {
+			return "", []string{"本次流程暂不纳入当前迭代，不能进入共享环境的发布与观察"}
+		}
+		if c.Policy.IntegrationBranch != p.Defaults.IntegrationBranch {
+			return "", []string{"集成分支还不是项目当前集成分支 " + p.Defaults.IntegrationBranch + "，不能占用共享预发或生产"}
+		}
+		if !c.mergedNow() {
+			return "", []string{"尚未记录已合入集成分支 " + c.Policy.IntegrationBranch + "。不会自动 merge 或 push"}
+		}
+		return StageRelease, nil
 	case StageRelease:
-		if c.liveAccept("release", fp) == nil {
-			return "", []string{"还没有对当前候选的发布声明。声明不是工具读回，候选变化后要重新声明"}
+		if !c.mergedNow() {
+			return "", []string{"集成记录已失效，不能把发布读回当作通过"}
 		}
-		bad := c.requiredFresh(p, "release", fp)
+		if c.liveAccept("release", BindIntegration, c.Merge.SHA) == nil {
+			return "", []string{"还没有对这个集成版本的发布声明。声明不是工具读回"}
+		}
+		bad := c.requiredFresh(p, GateRelease, fp)
 		if len(bad) > 0 {
 			return "", bad
 		}
@@ -276,9 +322,9 @@ func (c *Change) gate(p Project, fp Fingerprint) (string, []string) {
 	}
 }
 
-func hasRequiredCheck(p Project, when string) bool {
+func hasRequiredCheck(p Project, gate string) bool {
 	for _, ch := range p.Checks {
-		if ch.When == when && ch.Required {
+		if ch.Gate == gate && ch.Required {
 			return true
 		}
 	}
@@ -316,14 +362,47 @@ func (c *Change) verifiedFixed(pb Problem, fp Fingerprint) bool {
 	return c.effective(*pass, fp) == "pass"
 }
 
+func (c *Change) earliestArtifactGap() string {
+	for _, stage := range StageOrder {
+		body, ok := c.latestBody(stage)
+		if !ok {
+			continue
+		}
+		if err := validateArtifact(stage, c.Policy.ArtifactLevel, body); err != nil {
+			return stage
+		}
+	}
+	return ""
+}
+
+func validatePolicy(p Project, pol Policy) error {
+	if !containsStr(p.Environments, pol.Environment) {
+		return fmt.Errorf("environment %s 不在项目 environments 里", pol.Environment)
+	}
+	if pol.ReleaseStage != ReleaseIncluded && pol.ReleaseStage != ReleaseExcluded {
+		return fmt.Errorf("release_stage 只能是 included 或 excluded")
+	}
+	if pol.ArtifactLevel != LevelStandard && pol.ArtifactLevel != LevelAbbreviated {
+		return fmt.Errorf("artifact_level 只能是 standard 或 abbreviated")
+	}
+	switch pol.IntegrationIntent {
+	case IntentBranch:
+		if strings.TrimSpace(pol.IntegrationBranch) == "" {
+			return fmt.Errorf("integration_intent 为 branch 时必须给出 integration_branch")
+		}
+	case IntentNotCurrent:
+		return nil
+	default:
+		return fmt.Errorf("integration_intent 只能是 branch 或 not_in_current_iteration")
+	}
+	return nil
+}
+
 func nextActions(c *Change, p Project, fp Fingerprint) []string {
 	if c == nil {
 		return []string{"创建变更"}
 	}
-	if c.Status == StatusClosed {
-		return []string{}
-	}
-	if c.Status == StatusCancel {
+	if c.Status == StatusClosed || c.Status == StatusCancel {
 		return []string{}
 	}
 	if c.Status == StatusBlocked {
@@ -342,13 +421,19 @@ func nextActions(c *Change, p Project, fp Fingerprint) []string {
 	}
 	if c.Stage == StageAccept {
 		n = append(n, "记录交付接受")
+		if c.Policy.ReleaseStage == ReleaseIncluded {
+			n = append(n, "记录合入集成分支")
+		}
 	}
 	if c.Stage == StageRelease {
 		n = append(n, "记录发布声明")
 	}
+	if c.ReleaseHold != nil && c.ReleaseHold.Active {
+		n = append(n, "人确认后释放共享环境占用")
+	}
 	if c.Stage == StageRetro {
 		n = append(n, "记录问题处置")
 	}
-	n = append(n, "阻塞", "取消")
+	n = append(n, "修订 policy", "阻塞", "取消")
 	return n
 }
