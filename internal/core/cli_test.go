@@ -519,6 +519,107 @@ func TestConcurrentChangeWrites(t *testing.T) {
 	}
 }
 
+func TestProblemLibrary(t *testing.T) {
+	dir := t.TempDir()
+	project(t, dir, ReleaseExcluded)
+	gitInit(t, dir)
+	must(t, dir, ExitOK, "change", "create", "--goal", "问题库")
+	writeFile(t, filepath.Join(dir, "checks", "unit.sh"), "#!/bin/sh\nexit 1\n")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
+	must(t, dir, ExitCheck, "check", "--name", "unit")
+	writeFile(t, filepath.Join(dir, "checks", "unit.sh"), "#!/bin/sh\nexit 0\n")
+	must(t, dir, ExitOK, "check", "--name", "static")
+	must(t, dir, ExitOK, "check", "--name", "unit")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/accept.json")
+	must(t, dir, ExitOK, "check", "--name", "interact", "--environment", "integration")
+	must(t, dir, ExitOK, "change", "accept", "--what", "delivery", "--source", "human", "--reason", "接受", "--scope", "fixture")
+	must(t, dir, ExitOK, "change", "advance")
+
+	add := []string{"change", "problem", "add", "--title", "空选择静默成功", "--layer", "unit", "--symptom", "未传选择", "--target-check", "unit"}
+	m := must(t, dir, ExitOK, add...)
+	pb := m["problems"].([]any)[0].(map[string]any)
+	promoted, _ := pb["promoted_check"].(string)
+	if pb["count"].(float64) != 1 || pb["status"] != "open" || promoted != "" {
+		t.Fatalf("一次出现不应晋升: %#v", pb)
+	}
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/retro.json")
+	_, m, errb := runAt(t, dir, "change", "advance")
+	if !strings.Contains(errText(m, errb), "还没有处置") {
+		t.Fatalf("未处置不能关闭复盘: %s", errText(m, errb))
+	}
+	_, m, errb = runAt(t, dir, "change", "problem", "verify", "--problem", pb["id"].(string), "--check", "missing")
+	if !strings.Contains(errText(m, errb), "不能标成已验证修复") {
+		t.Fatalf("没有同一检查的失败和通过时不能标已修复: %s", errText(m, errb))
+	}
+	m = must(t, dir, ExitOK, append(add, "--note", "第二次")...)
+	pb = m["problems"].([]any)[0].(map[string]any)
+	if pb["count"].(float64) != 2 || pb["status"] != "promoted" || pb["promoted_check"] != "unit" {
+		t.Fatalf("两次应晋升到已有检查: %#v", pb)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, ".lauren", "problems"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".json") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("同类应追加而不是新建，文件数=%d", n)
+	}
+	if pb["verified_fixed"] != false {
+		t.Fatal("晋升本身不是已验证修复")
+	}
+	must(t, dir, ExitOK, "check", "--name", "unit")
+	m = must(t, dir, ExitOK, "change", "problem", "verify", "--problem", pb["id"].(string), "--check", "unit")
+	if m["problems"].([]any)[0].(map[string]any)["verified_fixed"] != true {
+		t.Fatal("旧失败和新通过之后应能标已验证修复")
+	}
+
+	other := t.TempDir()
+	raw := projectJSON(ReleaseExcluded)
+	raw = strings.Replace(raw, `"integration_branch": "main"`, `"integration_branch": "main", "promote_threshold": 3`, 1)
+	writeFile(t, filepath.Join(other, "lauren.project.json"), raw)
+	writeFile(t, filepath.Join(other, "checks", "static.sh"), "#!/bin/sh\nexit 0\n")
+	writeFile(t, filepath.Join(other, "checks", "unit.sh"), "#!/bin/sh\nexit 0\n")
+	writeFile(t, filepath.Join(other, "checks", "interact.sh"), "#!/bin/sh\nexit 0\n")
+	writeFile(t, filepath.Join(other, "checks", "read-version.sh"), "#!/bin/sh\necho version=0.1.0\n")
+	writeFile(t, filepath.Join(other, "artifacts", "demand.json"), `{"goal":"g","acceptance":["a"],"baseline":"b"}`)
+	writeFile(t, filepath.Join(other, "artifacts", "plan.json"), `{"approach":"a","risks":"r","prechecks":["p"]}`)
+	writeFile(t, filepath.Join(other, "artifacts", "impl.json"), `{"summary":"s"}`)
+	writeFile(t, filepath.Join(other, "artifacts", "accept.json"), `{"summary":"s"}`)
+	writeFile(t, filepath.Join(other, "artifacts", "retro.json"), `{"summary":"s"}`)
+	gitInit(t, other)
+	must(t, other, ExitOK, "change", "create", "--goal", "阈值")
+	must(t, other, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
+	must(t, other, ExitOK, "change", "advance")
+	must(t, other, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
+	must(t, other, ExitOK, "change", "advance")
+	must(t, other, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
+	must(t, other, ExitOK, "check", "--name", "static")
+	must(t, other, ExitOK, "check", "--name", "unit")
+	must(t, other, ExitOK, "change", "advance")
+	must(t, other, ExitOK, "change", "submit", "--artifact", "artifacts/accept.json")
+	must(t, other, ExitOK, "check", "--name", "interact", "--environment", "integration")
+	must(t, other, ExitOK, "change", "accept", "--what", "delivery", "--source", "human", "--reason", "接受", "--scope", "fixture")
+	must(t, other, ExitOK, "change", "advance")
+	args := []string{"change", "problem", "add", "--title", "另一类", "--layer", "lint", "--symptom", "告警", "--disposition", "later", "--reason", "先记住"}
+	m = must(t, other, ExitOK, args...)
+	must(t, other, ExitOK, append(args, "--note", "第二次")...)
+	m = must(t, other, ExitOK, "status")
+	pb = m["problems"].([]any)[0].(map[string]any)
+	if pb["count"].(float64) != 2 || pb["status"] == "promoted" {
+		t.Fatalf("阈值 3 时两次不应晋升: %#v", pb)
+	}
+}
+
 func TestSkillsCheck(t *testing.T) {
 	root := filepath.Join("..", "..")
 	code, _, errb := runAt(t, root, "skills", "check")

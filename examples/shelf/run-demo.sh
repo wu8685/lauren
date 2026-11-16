@@ -32,7 +32,44 @@ SHA=$(git rev-parse HEAD)
 "$BIN" change accept --what release --source human --reason "声明发布这个集成版本" --scope "shelf 示例"
 "$BIN" check --name version --environment staging
 "$BIN" change advance
-"$BIN" change problem add --summary "空选择曾没有失败路径" --repro "不传选择" --expected "明确失败" --actual "旧逻辑静默成功" --disposition later --reason "示例里的长期项，不挡住这次关闭" --defense "unit 检查" --scope project
+"$BIN" change problem add --title "空选择静默成功" --layer unit --symptom "未传选择" --repro "不传选择" --expected "明确失败" --actual "旧逻辑静默成功" --disposition later --reason "第一次只进入问题库" --scope project
+python3 - "$TMP" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+files = list((root / ".lauren" / "problems").glob("*.json"))
+assert len(files) == 1, files
+pb = json.loads(files[0].read_text())
+assert pb["count"] == 1 and pb["status"] == "open", pb
+proj = json.loads((root / "lauren.project.json").read_text())
+assert all(c["name"] != "empty-selection" for c in proj["checks"])
+PY
+"$BIN" change submit --artifact artifacts/retro.json
+"$BIN" change advance
+"$BIN" change create --goal "同一问题再次出现" --release-stage excluded
+"$BIN" change submit --artifact artifacts/demand.json
+"$BIN" change advance
+"$BIN" change submit --artifact artifacts/plan.json
+"$BIN" change advance
+"$BIN" change submit --artifact artifacts/impl.json
+"$BIN" check --name static
+"$BIN" check --name unit
+"$BIN" change advance
+"$BIN" change submit --artifact artifacts/accept.json
+"$BIN" check --name interact --environment integration
+"$BIN" change accept --what delivery --source human --reason "再次看过失败路径" --scope "shelf 示例"
+"$BIN" change advance
+"$BIN" change problem add --title "空选择静默成功" --layer unit --symptom "未传选择" --target-check empty-selection --disposition later --reason "第二次，晋升为检查" --scope project
+python3 - "$TMP" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+files = list((root / ".lauren" / "problems").glob("*.json"))
+assert len(files) == 1, files
+pb = json.loads(files[0].read_text())
+assert pb["count"] == 2 and pb["status"] == "promoted" and pb["promoted_check"] == "empty-selection", pb
+assert pb["verified_fixed"] is False
+proj = json.loads((root / "lauren.project.json").read_text())
+assert any(c["name"] == "empty-selection" for c in proj["checks"])
+PY
 "$BIN" change submit --artifact artifacts/retro.json
 "$BIN" change advance
 "$BIN" status

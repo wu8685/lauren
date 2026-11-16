@@ -16,7 +16,7 @@ description: 用 lauren CLI 推进一次有明确目标的变更。适用于明�
 7. 回退、阻塞、恢复、取消都要带理由：`rollback`、`block`、`resume`、`cancel`。
 8. 交付接受和发布声明用 `lauren change accept`。来源只能是 `human`、`other-session` 或 `external`。`gate` 为 `self_verification` 的检查不能充当独立验收。
 9. 手填版本用 `declare-version`，来源是 declaration。机器读回只来自 `release_readback`，并且要先 `change integration record` 记下合入的分支和 SHA。不要自动 merge、push 或部署。
-10. 复盘用 `change problem add` 记下问题。有去向再用 `dispose`。没有同一检查的旧失败和新通过时，不要把问题说成已验证修复。
+10. 复盘用 `change problem add` 写入 `.lauren/problems/`。先按 title、layer、symptom 检索；同类就追加一次出现。不要手填 verified_fixed。次数达到 `defaults.promote_threshold`（默认 2）才晋升成检查；只有一次就留在问题库里。有去向再用 `dispose`。没有同一检查的旧失败和新通过时，不要把问题说成已验证修复。
 11. 没有投递回执。不要说已经通知用户。
 12. 本地状态文件可以被改写。CLI 不认证操作者，也不能防止篡改。
 

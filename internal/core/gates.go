@@ -227,7 +227,7 @@ func (c *Change) mergedNow() bool {
 	return c.Merge != nil && !c.Merge.Withdrawn && c.Merge.Branch == c.Policy.IntegrationBranch && c.Policy.IntegrationIntent == IntentBranch
 }
 
-func (c *Change) gate(p Project, fp Fingerprint) (string, []string) {
+func (c *Change) gate(p Project, fp Fingerprint, libs []*LibraryProblem) (string, []string) {
 	if c.Status == StatusCancel {
 		return "", []string{"变更已取消"}
 	}
@@ -311,10 +311,17 @@ func (c *Change) gate(p Project, fp Fingerprint) (string, []string) {
 		}
 		return StageRetro, nil
 	case StageRetro:
-		for _, pb := range c.Problems {
-			if pb.Disposition == "" || strings.TrimSpace(pb.Reason) == "" {
-				return "", []string{"问题 " + pb.ID + " 还没有处置去向和理由"}
+		var bad []string
+		for _, pb := range libs {
+			if pb == nil || !pb.seenIn(c.ID) {
+				continue
 			}
+			if pb.Disposition == "" || strings.TrimSpace(pb.Reason) == "" {
+				bad = append(bad, "问题 "+pb.ID+" 还没有处置去向和理由")
+			}
+		}
+		if len(bad) > 0 {
+			return "", bad
 		}
 		return StatusClosed, nil
 	default:
@@ -398,7 +405,7 @@ func validatePolicy(p Project, pol Policy) error {
 	return nil
 }
 
-func nextActions(c *Change, p Project, fp Fingerprint) []string {
+func nextActions(c *Change, p Project, fp Fingerprint, libs []*LibraryProblem) []string {
 	if c == nil {
 		return []string{"创建变更"}
 	}
@@ -413,7 +420,7 @@ func nextActions(c *Change, p Project, fp Fingerprint) []string {
 	if c.Stage == StageBuild || c.Stage == StageAccept || c.Stage == StageRelease {
 		n = append(n, "运行检查")
 	}
-	if _, bad := c.gate(p, fp); len(bad) == 0 {
+	if _, bad := c.gate(p, fp, libs); len(bad) == 0 {
 		n = append(n, "申请推进")
 	}
 	if stageIndex(c.Stage) > 0 {

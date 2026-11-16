@@ -42,7 +42,7 @@ cd examples/shelf   # 演示请先复制到临时目录并 git init，见 run-de
 
 `status` 把阶段、整体状态、policy、检查结果、交付接受、发布声明和工具读回分开显示。没有完成百分比，也没有「已通知」。
 
-当前限制：同一个工作区同时只能有一个 `active` 或 `blocked` 的变更；另一个 git worktree 可以各自再有一个。项目目录必须是 git 根。`.lauren/runtime/` 和 git 忽略文件不进入源码指纹。只改项目 `defaults` 不会作废已有流程的证据；改 `checks` 或 `requirements` 会。检查进程超过 120 秒记为失败。细节见 [docs/v0.1.md](docs/v0.1.md)。
+当前限制：同一个工作区同时只能有一个 `active` 或 `blocked` 的变更；另一个 git worktree 可以各自再有一个。项目目录必须是 git 根。`.lauren/runtime/` 和 git 忽略文件不进入源码指纹。只改项目 `defaults` 不会作废已有流程的证据；改 `checks` 或 `requirements` 会。复盘把问题记到 `.lauren/problems/`，`defaults.promote_threshold` 默认是 2。检查进程超过 120 秒记为失败。细节见 [docs/v0.1.md](docs/v0.1.md)。
 
 新项目可以先 `lauren init`。检查命令写进 `lauren.project.json` 的 `argv`，由 `lauren check` 实际执行。这个配置是显式信任的，程序不会把变更目标拼成 shell。
 
