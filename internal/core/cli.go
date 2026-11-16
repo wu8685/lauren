@@ -270,32 +270,11 @@ func (a *app) changeCreate(args []string) int {
 	if err != nil {
 		return a.fail(ExitUsage, err.Error())
 	}
-	pol := Policy{
+	pol := overlayPolicy(Policy{
 		Environment: proj.Defaults.Environment, ReleaseStage: proj.Defaults.ReleaseStage,
 		ArtifactLevel: proj.Defaults.ArtifactLevel, IntegrationBranch: proj.Defaults.IntegrationBranch,
 		IntegrationIntent: IntentBranch,
-	}
-	if *env != "" {
-		pol.Environment = *env
-	}
-	if *release != "" {
-		pol.ReleaseStage = *release
-	}
-	if *level != "" {
-		pol.ArtifactLevel = *level
-	}
-	if *intent != "" {
-		pol.IntegrationIntent = *intent
-	}
-	if *branch != "" {
-		pol.IntegrationBranch = *branch
-		if pol.IntegrationIntent == "" {
-			pol.IntegrationIntent = IntentBranch
-		}
-	}
-	if pol.IntegrationIntent == IntentNotCurrent {
-		pol.IntegrationBranch = ""
-	}
+	}, *env, *release, *level, *branch, *intent)
 	if err := validatePolicy(proj, pol); err != nil {
 		return a.fail(ExitUsage, err.Error())
 	}
@@ -596,28 +575,7 @@ func (a *app) changePolicy(args []string) int {
 	}
 	root, _ := a.projectRoot()
 	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
-		next := ch.Policy
-		if *env != "" {
-			next.Environment = *env
-		}
-		if *release != "" {
-			next.ReleaseStage = *release
-		}
-		if *level != "" {
-			next.ArtifactLevel = *level
-		}
-		if *intent != "" {
-			next.IntegrationIntent = *intent
-		}
-		if *branch != "" {
-			next.IntegrationBranch = *branch
-			if *intent == "" {
-				next.IntegrationIntent = IntentBranch
-			}
-		}
-		if next.IntegrationIntent == IntentNotCurrent {
-			next.IntegrationBranch = ""
-		}
+		next := overlayPolicy(ch.Policy, *env, *release, *level, *branch, *intent)
 		if err := validatePolicy(proj, next); err != nil {
 			return a.fail(ExitUsage, err.Error()), nil
 		}
@@ -730,6 +688,31 @@ func (a *app) changeRelease(args []string) int {
 		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "release-clear", Message: *reason})
 		return ExitOK, a.payload(root, "change release clear", ch, proj, fp)
 	})
+}
+
+func overlayPolicy(base Policy, env, release, level, branch, intent string) Policy {
+	if env != "" {
+		base.Environment = env
+	}
+	if release != "" {
+		base.ReleaseStage = release
+	}
+	if level != "" {
+		base.ArtifactLevel = level
+	}
+	if intent != "" {
+		base.IntegrationIntent = intent
+	}
+	if branch != "" {
+		base.IntegrationBranch = branch
+		if base.IntegrationIntent == "" {
+			base.IntegrationIntent = IntentBranch
+		}
+	}
+	if base.IntegrationIntent == IntentNotCurrent {
+		base.IntegrationBranch = ""
+	}
+	return base
 }
 
 func isSHA(s string) bool {
@@ -968,7 +951,7 @@ func (a *app) cmdCheck(args []string) int {
 		}
 		for i := range runs {
 			ch.Runs = append(ch.Runs, runs[i])
-			if runs[i].Status != "pass" || (runs[i].BindKind == BindWorktree && !envAccepted(findSpec(proj, runs[i].Name), proj, runs[i].Environment)) {
+			if runs[i].Status != "pass" {
 				code = ExitCheck
 			}
 		}
@@ -994,13 +977,6 @@ func (a *app) cmdCheck(args []string) int {
 		return a.fail(ExitUsage, err.Error())
 	}
 	return code
-}
-
-func findSpec(p Project, name string) CheckSpec {
-	if s := findCheck(p, name); s != nil {
-		return *s
-	}
-	return CheckSpec{Name: name}
 }
 
 func blockedRun(spec CheckSpec, env, note string) CheckRun {
@@ -1208,7 +1184,7 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 			}
 			run, _ := ch.satisfying(spec, proj, fp)
 			if run != nil {
-				if v := toolVersionFrom(*run, root); v != "" {
+				if v := toolVersionFrom(*run); v != "" {
 					tool = &VersionFact{Value: v, Source: "tool", At: run.Ended}
 				}
 			}

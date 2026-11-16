@@ -116,7 +116,7 @@ func preview(s string, n int) string {
 	return s[:n] + "…"
 }
 
-func toolVersionFrom(run CheckRun, root string) string {
+func toolVersionFrom(run CheckRun) string {
 	if run.LogPath == "" {
 		return ""
 	}

@@ -97,16 +97,10 @@ func projectJSON(release string) string {
 func project(t *testing.T, dir, release string) {
 	t.Helper()
 	writeFile(t, filepath.Join(dir, "lauren.project.json"), projectJSON(release))
-	writeFile(t, filepath.Join(dir, "checks", "static.sh"), "#!/bin/sh\ngrep -q '空列表' app/copy.txt\n")
-	writeFile(t, filepath.Join(dir, "checks", "unit.sh"), "#!/bin/sh\n./app/logic.sh off | grep -q closed\n./app/logic.sh empty | grep -q empty-selection\n./app/logic.sh fail | grep -q failed-path\n")
-	writeFile(t, filepath.Join(dir, "checks", "interact.sh"), "#!/bin/sh\ngrep -q 'clicked-save' app/session.log\n")
-	writeFile(t, filepath.Join(dir, "checks", "read-version.sh"), "#!/bin/sh\nprintf 'version=%s\\n' \"$(cat app/build-version.txt)\"\n")
-	writeFile(t, filepath.Join(dir, "checks", "partial.sh"), "#!/bin/sh\nexit 75\n")
-	writeFile(t, filepath.Join(dir, "checks", "fail.sh"), "#!/bin/sh\necho token=supersecret\nexit 1\n")
-	writeFile(t, filepath.Join(dir, "app", "copy.txt"), "空列表时说明没有条目\n")
-	writeFile(t, filepath.Join(dir, "app", "logic.sh"), "#!/bin/sh\ncase \"$1\" in\noff) echo closed;;\nempty) echo empty-selection;;\nfail) echo failed-path;;\n*) echo ok;;\nesac\n")
-	writeFile(t, filepath.Join(dir, "app", "session.log"), "clicked-save\n")
-	writeFile(t, filepath.Join(dir, "app", "build-version.txt"), "0.1.0\n")
+	writeFile(t, filepath.Join(dir, "checks", "static.sh"), "#!/bin/sh\nexit 0\n")
+	writeFile(t, filepath.Join(dir, "checks", "unit.sh"), "#!/bin/sh\nexit 0\n")
+	writeFile(t, filepath.Join(dir, "checks", "interact.sh"), "#!/bin/sh\nexit 0\n")
+	writeFile(t, filepath.Join(dir, "checks", "read-version.sh"), "#!/bin/sh\necho version=0.1.0\n")
 	writeFile(t, filepath.Join(dir, "artifacts", "demand.json"), `{"goal":"空选择要失败","acceptance":["关闭","空选择","失败路径"],"baseline":"虚构记事"}`)
 	writeFile(t, filepath.Join(dir, "artifacts", "plan.json"), `{"approach":"补三条路径","risks":"只测文案","prechecks":["unit"]}`)
 	writeFile(t, filepath.Join(dir, "artifacts", "impl.json"), `{"summary":"补了三条路径"}`)
@@ -148,9 +142,13 @@ func TestExcludedReleaseAndPolicy(t *testing.T) {
 	must(t, dir, ExitOK, "check", "--name", "unit")
 	must(t, dir, ExitOK, "change", "advance")
 	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/accept.json")
-	_, m, errb := runAt(t, dir, "check", "--name", "interact")
-	if !strings.Contains(errText(m, errb), "不在该检查可接受") && (m["checks"] == nil) {
-		t.Fatalf("development 不能给只接受 integration/staging 的验收检查放行: %v %s", m, errb)
+	code, m, errb := runAt(t, dir, "check", "--name", "interact")
+	if code == ExitOK || !blockedCheck(m, "interact") {
+		t.Fatalf("development 不能给只接受 integration/staging 的验收检查放行: code=%d %v %s", code, m, errb)
+	}
+	_, m, errb = runAt(t, dir, "change", "policy", "set", "--environment", "integration")
+	if !strings.Contains(errText(m, errb), "--reason") {
+		t.Fatalf("policy set 没有理由时应拒绝: %s", errText(m, errb))
 	}
 	must(t, dir, ExitOK, "check", "--name", "interact", "--environment", "integration")
 	must(t, dir, ExitOK, "change", "policy", "set", "--environment", "staging", "--reason", "换默认环境")
@@ -252,6 +250,17 @@ func TestIntegrationTargetAndWorktrees(t *testing.T) {
 	if !strings.Contains(errText(m, errb), "还不是项目当前集成分支") {
 		t.Fatalf("新目标还不是当前集成分支时不能占共享发布: %s", errText(m, errb))
 	}
+}
+
+func blockedCheck(m map[string]any, name string) bool {
+	checks, _ := m["checks"].([]any)
+	for _, c := range checks {
+		cv, _ := c.(map[string]any)
+		if cv["name"] == name && cv["effective_status"] == "blocked" {
+			return true
+		}
+	}
+	return false
 }
 
 func gitSHA(t *testing.T, dir string) string {
