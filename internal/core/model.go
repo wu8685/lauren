@@ -64,20 +64,22 @@ type Project struct {
 }
 
 type Defaults struct {
-	Environment       string `json:"environment"`
-	ReleaseStage      string `json:"release_stage"`
-	ArtifactLevel     string `json:"artifact_level"`
-	IntegrationBranch string `json:"integration_branch"`
-	PromoteThreshold  int    `json:"promote_threshold,omitempty"`
+	Environment         string `json:"environment"`
+	ReleaseStage        string `json:"release_stage"`
+	ArtifactLevel       string `json:"artifact_level"`
+	IntegrationBranch   string `json:"integration_branch"`
+	PromoteThreshold    int    `json:"promote_threshold,omitempty"`
+	CheckTimeoutSeconds int64  `json:"check_timeout_seconds,omitempty"`
 }
 
 type CheckSpec struct {
-	Name         string   `json:"name"`
-	Layer        string   `json:"layer"`
-	Gate         string   `json:"gate"`
-	Argv         []string `json:"argv"`
-	Required     bool     `json:"required"`
-	Environments []string `json:"environments,omitempty"`
+	Name           string   `json:"name"`
+	Layer          string   `json:"layer"`
+	Gate           string   `json:"gate"`
+	Argv           []string `json:"argv"`
+	Required       bool     `json:"required"`
+	Environments   []string `json:"environments,omitempty"`
+	TimeoutSeconds int64    `json:"timeout_seconds,omitempty"`
 }
 
 type Requirement struct {
@@ -151,6 +153,7 @@ type CheckRun struct {
 	IntegrationSHA     string    `json:"integration_sha,omitempty"`
 	CandidateKind      string    `json:"candidate_kind"`
 	Note               string    `json:"note,omitempty"`
+	TimeoutSeconds     int64     `json:"timeout_seconds,omitempty"`
 }
 
 type Problem struct {

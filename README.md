@@ -2,7 +2,7 @@
 
 lauren 是一套个人用的编码质量工具。它用一个不依赖大模型的命令行程序盯住一次变更：从把需求写清楚，到实现、验收、可选的发布观察，再到复盘。Codex 和 Claude Code 可以共用同一份 Skill 来引导调用这个程序。门禁在程序里，不在 Skill 里。
 
-讨论过程见 [docs/讨论记录.md](docs/讨论记录.md)。命令、阶段、问题库和限制见 [docs/v0.1.md](docs/v0.1.md)。把 Skill 放进另一个项目，以及为 macOS 交叉编译，见 [docs/接入.md](docs/接入.md)。
+讨论过程见 [docs/讨论记录.md](docs/讨论记录.md)。命令、阶段、问题库、检查超时和限制见 [docs/v0.1.md](docs/v0.1.md)。把 Skill 放进另一个项目，以及为 macOS 交叉编译，见 [docs/接入.md](docs/接入.md)。
 
 背景演讲不是本仓库的规格：<https://ai.engineer/code/2026/talks/lauren-tan>
 

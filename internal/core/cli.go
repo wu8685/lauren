@@ -128,7 +128,7 @@ func (a *app) cmdInit(args []string) int {
 		Environments: []string{"development", "integration", "staging", "production"},
 		Defaults: Defaults{
 			Environment: *env, ReleaseStage: *release, ArtifactLevel: *level, IntegrationBranch: *branch,
-			PromoteThreshold: 2,
+			PromoteThreshold: 2, CheckTimeoutSeconds: defaultCheckTimeoutSeconds,
 		},
 		Checks: []CheckSpec{}, Requirements: []Requirement{},
 	}
@@ -144,7 +144,7 @@ func (a *app) cmdInit(args []string) int {
 	if a.json {
 		return a.emit(ExitOK, map[string]any{"ok": true, "command": "init", "config": path, "runtime": runtimeDir(root)})
 	}
-	fmt.Fprintf(a.out, "已写入 %s\n运行状态在 %s，按变更分目录，不进 git。\n", path, runtimeDir(root))
+	fmt.Fprintf(a.out, "已写入 %s\n单项检查默认超时 %d 秒。\n运行状态在 %s，按变更分目录，不进 git。\n", path, p.Defaults.CheckTimeoutSeconds, runtimeDir(root))
 	return ExitOK
 }
 
@@ -967,16 +967,16 @@ func (a *app) cmdCheck(args []string) int {
 		if spec.Gate == GateRelease || spec.Layer == "release_readback" {
 			switch {
 			case ch0.Policy.IntegrationIntent != IntentBranch:
-				runs = append(runs, blockedRun(spec, env, "暂不纳入当前迭代，不能占用共享预发或生产的发布读回"))
+				runs = append(runs, blockedRun(spec, proj, env, "暂不纳入当前迭代，不能占用共享预发或生产的发布读回"))
 			case ch0.Policy.IntegrationBranch != proj.Defaults.IntegrationBranch:
-				runs = append(runs, blockedRun(spec, env, "集成分支还不是项目当前集成分支，不能做共享环境发布读回"))
+				runs = append(runs, blockedRun(spec, proj, env, "集成分支还不是项目当前集成分支，不能做共享环境发布读回"))
 			case !ch0.mergedNow():
-				runs = append(runs, blockedRun(spec, env, "尚未记录合入集成分支，不能把工作区里的版本当成已部署证据"))
+				runs = append(runs, blockedRun(spec, proj, env, "尚未记录合入集成分支，不能把工作区里的版本当成已部署证据"))
 			case !envAccepted(spec, proj, env):
-				runs = append(runs, blockedRun(spec, env, "环境 "+env+" 不能充当 release_readback。开发或 CI 里打印的版本不是已部署证据"))
+				runs = append(runs, blockedRun(spec, proj, env, "环境 "+env+" 不能充当 release_readback。开发或 CI 里打印的版本不是已部署证据"))
 			default:
 				if wt, oid, ok := findSharedHold(root); ok && oid != ch0.ID {
-					runs = append(runs, blockedRun(spec, env, fmt.Sprintf("共享环境正被 %s 的变更 %s 占用", wt, oid)))
+					runs = append(runs, blockedRun(spec, proj, env, fmt.Sprintf("共享环境正被 %s 的变更 %s 占用", wt, oid)))
 					continue
 				}
 				_ = WithChange(root, cid, func(ch *Change) error {
@@ -985,15 +985,15 @@ func (a *app) cmdCheck(args []string) int {
 					}
 					return nil
 				})
-				runs = append(runs, runCheck(root, cid, spec, fp, ch0.EvidenceGeneration, env, ch0.Policy.IntegrationBranch, ch0.Merge.SHA))
+				runs = append(runs, runCheck(root, cid, proj, spec, fp, ch0.EvidenceGeneration, env, ch0.Policy.IntegrationBranch, ch0.Merge.SHA))
 			}
 			continue
 		}
 		if !envAccepted(spec, proj, env) {
-			runs = append(runs, blockedRun(spec, env, "环境 "+env+" 不在该检查可接受的证据环境里"))
+			runs = append(runs, blockedRun(spec, proj, env, "环境 "+env+" 不在该检查可接受的证据环境里"))
 			continue
 		}
-		runs = append(runs, runCheck(root, cid, spec, fp, ch0.EvidenceGeneration, env, "", ""))
+		runs = append(runs, runCheck(root, cid, proj, spec, fp, ch0.EvidenceGeneration, env, "", ""))
 	}
 	fpAfter := fingerprint(root, proj)
 	code := ExitOK
@@ -1034,12 +1034,12 @@ func (a *app) cmdCheck(args []string) int {
 	return code
 }
 
-func blockedRun(spec CheckSpec, env, note string) CheckRun {
+func blockedRun(spec CheckSpec, proj Project, env, note string) CheckRun {
 	now := time.Now().UTC()
 	return CheckRun{
 		ID: newID("r-"), Name: spec.Name, Layer: spec.Layer, Gate: spec.Gate, Argv: spec.Argv,
 		Environment: env, Status: "blocked", Started: now, Ended: now, Note: note,
-		BindKind: BindWorktree, CandidateKind: "blocked",
+		BindKind: BindWorktree, CandidateKind: "blocked", TimeoutSeconds: proj.effectiveTimeoutSeconds(spec),
 	}
 }
 
@@ -1149,6 +1149,7 @@ type checkView struct {
 	LogBytes        int    `json:"log_bytes"`
 	Preview         string `json:"preview,omitempty"`
 	Note            string `json:"note,omitempty"`
+	TimeoutSeconds  int64  `json:"timeout_seconds,omitempty"`
 }
 
 type problemView struct {
@@ -1217,6 +1218,7 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 			Name: r.Name, Layer: r.Layer, Gate: r.Gate, Environment: r.Environment,
 			Status: r.Status, EffectiveStatus: ch.effective(r, fp), ExitCode: r.ExitCode,
 			Cwd: r.Cwd, LogPath: r.LogPath, LogBytes: r.LogBytes, Preview: r.Preview, Note: r.Note,
+			TimeoutSeconds: r.TimeoutSeconds,
 		}}, p.Checks...)
 	}
 	product := len(proj.Requirements) > 0
@@ -1307,7 +1309,7 @@ func writeHuman(w io.Writer, p statusPayload) {
 			if c.ExitCode != nil {
 				exit = fmt.Sprintf("exit %d", *c.ExitCode)
 			}
-			fmt.Fprintf(w, "  %s %s %s env=%s 记录=%s 有效=%s %s\n", c.Name, c.Gate, c.Layer, c.Environment, c.Status, c.EffectiveStatus, exit)
+			fmt.Fprintf(w, "  %s %s %s env=%s timeout=%ds 记录=%s 有效=%s %s\n", c.Name, c.Gate, c.Layer, c.Environment, c.TimeoutSeconds, c.Status, c.EffectiveStatus, exit)
 			if c.Note != "" {
 				fmt.Fprintf(w, "    %s\n", c.Note)
 			}
