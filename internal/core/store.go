@@ -275,6 +275,13 @@ func loadProject(root string) (Project, error) {
 	return p, nil
 }
 
+func (p Project) promoteThreshold() int {
+	if p.Defaults.PromoteThreshold <= 0 {
+		return 2
+	}
+	return p.Defaults.PromoteThreshold
+}
+
 func (p Project) validate() error {
 	if len(p.Environments) == 0 {
 		return fmt.Errorf("项目配置缺少 environments")
@@ -291,6 +298,9 @@ func (p Project) validate() error {
 	}
 	if strings.TrimSpace(d.IntegrationBranch) == "" {
 		return fmt.Errorf("defaults.integration_branch 不能为空")
+	}
+	if d.PromoteThreshold < 0 {
+		return fmt.Errorf("defaults.promote_threshold 不能为负")
 	}
 	for _, ch := range p.Checks {
 		switch ch.Gate {

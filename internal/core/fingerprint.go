@@ -94,7 +94,7 @@ func catalogHash(proj Project) string {
 
 func skipPath(path string) bool {
 	p := strings.TrimPrefix(path, "./")
-	return p == ".lauren/runtime" || strings.HasPrefix(p, ".lauren/runtime/") || p == ".lauren" || strings.HasPrefix(p, ".git/")
+	return p == ".lauren/runtime" || strings.HasPrefix(p, ".lauren/runtime/") || p == ".lauren/problems" || strings.HasPrefix(p, ".lauren/problems/") || p == ".lauren" || strings.HasPrefix(p, ".git/")
 }
 
 func hashFile(path string) (string, error) {

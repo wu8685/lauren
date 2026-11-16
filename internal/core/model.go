@@ -68,6 +68,7 @@ type Defaults struct {
 	ReleaseStage      string `json:"release_stage"`
 	ArtifactLevel     string `json:"artifact_level"`
 	IntegrationBranch string `json:"integration_branch"`
+	PromoteThreshold  int    `json:"promote_threshold,omitempty"`
 }
 
 type CheckSpec struct {

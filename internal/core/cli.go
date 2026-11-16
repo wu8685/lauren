@@ -128,6 +128,7 @@ func (a *app) cmdInit(args []string) int {
 		Environments: []string{"development", "integration", "staging", "production"},
 		Defaults: Defaults{
 			Environment: *env, ReleaseStage: *release, ArtifactLevel: *level, IntegrationBranch: *branch,
+			PromoteThreshold: 2,
 		},
 		Checks: []CheckSpec{}, Requirements: []Requirement{},
 	}
@@ -361,7 +362,16 @@ func (a *app) changeAdvance(args []string) int {
 	}
 	root, _ := a.projectRoot()
 	return a.withChange(id.id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
-		next, bad := ch.gate(proj, fp)
+		if ch.Stage == StageRetro {
+			if _, err := promoteDue(root, &proj, ch); err != nil {
+				return a.fail(ExitGate, err.Error()), nil
+			}
+		}
+		libs, lerr := loadLibrary(root)
+		if lerr != nil {
+			return a.fail(ExitInternal, lerr.Error()), nil
+		}
+		next, bad := ch.gate(proj, fp, libs)
 		if len(bad) > 0 {
 			return a.fail(ExitGate, strings.Join(bad, "；")), nil
 		}
@@ -747,10 +757,16 @@ func (a *app) problemAdd(args []string) int {
 	fs := flag.NewFlagSet("problem add", flag.ContinueOnError)
 	fs.SetOutput(a.err)
 	id := fs.String("id", "", "")
+	title := fs.String("title", "", "")
 	summary := fs.String("summary", "", "")
+	layer := fs.String("layer", "", "")
+	symptom := fs.String("symptom", "", "")
 	repro := fs.String("repro", "", "")
 	expected := fs.String("expected", "", "")
 	actual := fs.String("actual", "", "")
+	detail := fs.String("detail", "", "")
+	note := fs.String("note", "", "")
+	target := fs.String("target-check", "", "")
 	disp := fs.String("disposition", "", "")
 	reason := fs.String("reason", "", "")
 	defense := fs.String("defense", "", "")
@@ -758,8 +774,11 @@ func (a *app) problemAdd(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
-	if *summary == "" {
-		return a.fail(ExitUsage, "问题需要 --summary")
+	if *title == "" {
+		*title = *summary
+	}
+	if *title == "" {
+		return a.fail(ExitUsage, "问题需要 --title")
 	}
 	switch *disp {
 	case "", "implemented", "later", "rejected":
@@ -774,9 +793,22 @@ func (a *app) problemAdd(args []string) int {
 	}
 	root, _ := a.projectRoot()
 	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
-		pb := Problem{ID: newID("p-"), Summary: *summary, Repro: *repro, Expected: *expected, Actual: *actual, Disposition: *disp, Reason: *reason, Defense: *defense, Scope: *scope}
-		ch.Problems = append(ch.Problems, pb)
-		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "problem", Message: pb.ID + " " + *disp})
+		if ch.Stage != StageRetro {
+			return a.fail(ExitGate, "记录问题是复盘与改进的内容"), nil
+		}
+		pb, promoted, err := recordProblem(root, &proj, ch, problemInput{
+			Title: *title, Layer: *layer, Symptom: *symptom, Repro: *repro, Expected: *expected, Actual: *actual,
+			Detail: *detail, Defense: *defense, TargetCheck: *target, Scope: *scope, Note: *note,
+			Disposition: *disp, Reason: *reason,
+		}, true)
+		if err != nil {
+			return a.fail(ExitUsage, err.Error()), nil
+		}
+		if promoted {
+			ch.invalidateEvidence()
+			ch.CatalogHash = catalogHash(proj)
+		}
+		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "problem", Message: pb.ID + " count=" + fmt.Sprint(pb.Count)})
 		return ExitOK, a.payload(root, "change problem add", ch, proj, fp)
 	})
 }
@@ -801,12 +833,25 @@ func (a *app) problemDispose(args []string) int {
 	}
 	root, _ := a.projectRoot()
 	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
-		for i := range ch.Problems {
-			if ch.Problems[i].ID != *pid {
+		if ch.Stage != StageRetro {
+			return a.fail(ExitGate, "处置问题是复盘与改进的内容"), nil
+		}
+		libs, err := loadLibrary(root)
+		if err != nil {
+			return a.fail(ExitInternal, err.Error()), nil
+		}
+		for _, pb := range libs {
+			if pb.ID != *pid {
 				continue
 			}
-			ch.Problems[i].Disposition = *disp
-			ch.Problems[i].Reason = *reason
+			pb.Disposition = *disp
+			pb.Reason = *reason
+			if *disp == "rejected" {
+				pb.Status = "rejected"
+			}
+			if err := saveLibraryProblem(root, pb); err != nil {
+				return a.fail(ExitInternal, err.Error()), nil
+			}
 			ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "dispose", Message: *pid + " " + *disp})
 			return ExitOK, a.payload(root, "change problem dispose", ch, proj, fp)
 		}
@@ -828,10 +873,14 @@ func (a *app) problemVerify(args []string) int {
 	}
 	root, _ := a.projectRoot()
 	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
-		var pb *Problem
-		for i := range ch.Problems {
-			if ch.Problems[i].ID == *pid {
-				pb = &ch.Problems[i]
+		libs, err := loadLibrary(root)
+		if err != nil {
+			return a.fail(ExitInternal, err.Error()), nil
+		}
+		var pb *LibraryProblem
+		for _, item := range libs {
+			if item.ID == *pid {
+				pb = item
 			}
 		}
 		if pb == nil {
@@ -856,6 +905,10 @@ func (a *app) problemVerify(args []string) int {
 		}
 		pb.FailRun = failRun.ID
 		pb.PassRun = passRun.ID
+		pb.VerifiedFixed = true
+		if err := saveLibraryProblem(root, pb); err != nil {
+			return a.fail(ExitInternal, err.Error()), nil
+		}
 		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "verify", Message: pb.ID + " " + *check})
 		return ExitOK, a.payload(root, "change problem verify", ch, proj, fp)
 	})
@@ -962,7 +1015,9 @@ func (a *app) cmdCheck(args []string) int {
 				}
 			}
 		}
-		noteCheckFailures(ch, runs)
+		if err := noteCheckFailures(root, &proj, ch, runs); err != nil {
+			return err
+		}
 		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "check", Message: fmt.Sprintf("%s 运行 %d 项", env, len(runs))})
 		view := a.payload(root, "check", ch, proj, fpAfter)
 		view.OK = code == ExitOK
@@ -988,34 +1043,34 @@ func blockedRun(spec CheckSpec, env, note string) CheckRun {
 	}
 }
 
-func noteCheckFailures(ch *Change, runs []CheckRun) {
+func noteCheckFailures(root string, proj *Project, ch *Change, runs []CheckRun) error {
 	for _, r := range runs {
 		if r.Status != "fail" {
 			continue
 		}
 		if r.Gate == GateAcceptance && (ch.Stage == StageAccept || ch.Stage == StageRelease) {
 			ch.Stage = StageBuild
-			ch.addOpenProblem(r.Name+" 验收失败", "验收检查失败。回到实现与自验，不能把验收改成通过。")
+			if _, _, err := recordProblem(root, proj, ch, problemInput{
+				Title: r.Name + " 验收失败", Layer: r.Layer, Symptom: "验收检查失败", Actual: r.Note, Scope: "change",
+			}, false); err != nil {
+				return err
+			}
 			ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "loop", Message: "验收失败，回到实现与自验"})
 		}
 		if (r.Gate == GateRelease || r.Layer == "release_readback") && ch.Stage == StageRelease {
 			ch.Stage = StageBuild
-			ch.addOpenProblem(r.Name+" 发布读回失败", "没有自动部署或撤回。共享环境需要人处理，然后 change release clear。")
+			if _, _, err := recordProblem(root, proj, ch, problemInput{
+				Title: r.Name + " 发布读回失败", Layer: r.Layer, Symptom: "发布读回失败", Actual: "没有自动撤回共享环境", Scope: "change",
+			}, false); err != nil {
+				return err
+			}
 			if ch.ReleaseHold != nil {
 				ch.ReleaseHold.Note = "发布读回失败，占用保留到人处理"
 			}
 			ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "loop", Message: "发布读回失败，回到实现与自验。没有自动撤回共享环境"})
 		}
 	}
-}
-
-func (c *Change) addOpenProblem(summary, actual string) {
-	for _, pb := range c.Problems {
-		if pb.Summary == summary && pb.Disposition == "" {
-			return
-		}
-	}
-	c.Problems = append(c.Problems, Problem{ID: newID("p-"), Summary: summary, Actual: actual, Scope: "change"})
+	return nil
 }
 
 func (a *app) cmdStatus(args []string) int  { return a.show("status", flagID(a.err, args), false) }
@@ -1103,6 +1158,9 @@ type problemView struct {
 	Reason        string `json:"reason"`
 	Scope         string `json:"scope"`
 	VerifiedFixed bool   `json:"verified_fixed"`
+	Count         int    `json:"count"`
+	Status        string `json:"status"`
+	PromotedCheck string `json:"promoted_check,omitempty"`
 }
 
 type facts struct {
@@ -1139,7 +1197,7 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 	p := statusPayload{
 		OK: true, Command: cmd, ID: ch.ID, Goal: ch.Goal, Stage: ch.Stage, Status: ch.Status,
 		Policy: &ch.Policy, Candidate: fp, Merge: ch.Merge, DeclaredVersion: ch.DeclaredVersion,
-		Next:  nextActions(ch, proj, fp),
+		Next:  nextActions(ch, proj, fp, libsFor(root, ch)),
 		Trust: "本地状态文件可以被改写。这个 CLI 不认证人类，也不能防止恶意篡改。合并是否可信看仓库 CI 重跑；交付是否接受看来源被明确记下的接受记录。不会自动 merge、push、部署或通知。",
 	}
 	if ch.Block != nil && ch.Status == StatusBlocked {
@@ -1198,10 +1256,11 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 		ReleaseVerified:  releaseVerified,
 		ProductVerified:  product,
 	}
-	for _, pb := range ch.Problems {
+	for _, pb := range libsFor(root, ch) {
 		p.Problems = append(p.Problems, problemView{
-			ID: pb.ID, Summary: pb.Summary, Disposition: pb.Disposition, Reason: pb.Reason,
-			Scope: pb.Scope, VerifiedFixed: ch.verifiedFixed(pb, fp),
+			ID: pb.ID, Summary: pb.Title, Disposition: pb.Disposition, Reason: pb.Reason,
+			Scope: pb.Scope, VerifiedFixed: ch.libraryVerified(pb, fp),
+			Count: pb.Count, Status: pb.Status, PromotedCheck: pb.PromotedCheck,
 		})
 	}
 	return p
@@ -1257,7 +1316,7 @@ func writeHuman(w io.Writer, p statusPayload) {
 	if len(p.Problems) > 0 {
 		fmt.Fprintln(w, "问题:")
 		for _, pb := range p.Problems {
-			fmt.Fprintf(w, "  %s %s 已验证修复=%t 范围=%s\n", pb.ID, pb.Disposition, pb.VerifiedFixed, pb.Scope)
+			fmt.Fprintf(w, "  %s %s 次数=%d 状态=%s 已验证修复=%t 范围=%s\n", pb.ID, pb.Disposition, pb.Count, pb.Status, pb.VerifiedFixed, pb.Scope)
 		}
 	}
 	fmt.Fprintln(w, "下一合法动作:")
