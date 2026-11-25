@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -91,6 +92,10 @@ func runCheck(root, changeID string, proj Project, spec CheckSpec, fp Fingerprin
 	run.LogDigest = hex.EncodeToString(sum[:])
 	run.Classification = classificationFromLog(raw)
 	run.Ended = time.Now().UTC()
+	if execd, skipd, ok := statsFromLog(raw); ok {
+		run.Executed = execd
+		run.Skipped = skipd
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		run.Status = "fail"
 		run.Note = fmt.Sprintf("检查超时（%d秒）", secs)
@@ -100,6 +105,10 @@ func runCheck(root, changeID string, proj Project, spec CheckSpec, fp Fingerprin
 		run.Status = "pass"
 		code := 0
 		run.ExitCode = &code
+		if why := executedGap(spec, run); why != "" {
+			run.Status = "fail"
+			run.Note = why
+		}
 		return run
 	}
 	if ee, ok := err.(*exec.ExitError); ok {
@@ -175,6 +184,39 @@ func (c *Change) redBlocked(p Project) string {
 		return ""
 	}
 	return "启用了 Red 门禁，但没有先失败再通过的记录。失败结果要带脚本写的 lauren-class classification=assertion_fail 或 behavior_fail。可以 change red skip --reason 显式跳过"
+}
+
+var statsLine = regexp.MustCompile(`^lauren-stats executed=(\d+) skipped=(\d+)\b`)
+
+func statsFromLog(raw string) (executed, skipped *int, ok bool) {
+	var e, s int
+	found := false
+	for _, line := range strings.Split(raw, "\n") {
+		m := statsLine.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
+			continue
+		}
+		e, _ = strconv.Atoi(m[1])
+		s, _ = strconv.Atoi(m[2])
+		found = true
+	}
+	if !found {
+		return nil, nil, false
+	}
+	return &e, &s, true
+}
+
+func executedGap(spec CheckSpec, run CheckRun) string {
+	if !spec.RequireExecuted {
+		return ""
+	}
+	if run.Executed == nil {
+		return "require_executed：输出里没有 lauren-stats"
+	}
+	if *run.Executed == 0 {
+		return "require_executed：executed 为 0"
+	}
+	return ""
 }
 
 func preview(s string, n int) string {

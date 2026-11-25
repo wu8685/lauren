@@ -75,13 +75,14 @@ type Defaults struct {
 }
 
 type CheckSpec struct {
-	Name           string   `json:"name"`
-	Layer          string   `json:"layer"`
-	Gate           string   `json:"gate"`
-	Argv           []string `json:"argv"`
-	Required       bool     `json:"required"`
-	Environments   []string `json:"environments,omitempty"`
-	TimeoutSeconds int64    `json:"timeout_seconds,omitempty"`
+	Name            string   `json:"name"`
+	Layer           string   `json:"layer"`
+	Gate            string   `json:"gate"`
+	Argv            []string `json:"argv"`
+	Required        bool     `json:"required"`
+	Environments    []string `json:"environments,omitempty"`
+	TimeoutSeconds  int64    `json:"timeout_seconds,omitempty"`
+	RequireExecuted bool     `json:"require_executed,omitempty"`
 }
 
 type Requirement struct {
@@ -181,6 +182,8 @@ type CheckRun struct {
 	TimeoutSeconds     int64     `json:"timeout_seconds,omitempty"`
 	Classification     string    `json:"classification,omitempty"`
 	LogDigest          string    `json:"log_digest,omitempty"`
+	Executed           *int      `json:"executed,omitempty"`
+	Skipped            *int      `json:"skipped,omitempty"`
 }
 
 type RedSkip struct {

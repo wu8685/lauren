@@ -101,6 +101,7 @@ func (a *app) cmdInit(args []string) int {
 	level := fs.String("artifact-level", LevelStandard, "standard 或 abbreviated")
 	branch := fs.String("integration-branch", "", "项目默认集成分支")
 	dir := fs.String("dir", "", "要初始化的目录")
+	adapter := fs.String("adapter", "", "复制 adapters/<名称> 到项目并加上 require_executed 检查")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
@@ -131,6 +132,11 @@ func (a *app) cmdInit(args []string) int {
 			PromoteThreshold: 2, CheckTimeoutSeconds: defaultCheckTimeoutSeconds,
 		},
 		Checks: []CheckSpec{}, Requirements: []Requirement{},
+	}
+	if strings.TrimSpace(*adapter) != "" {
+		if err := installAdapter(root, *adapter, &p); err != nil {
+			return a.fail(ExitUsage, err.Error())
+		}
 	}
 	if err := p.validate(); err != nil {
 		return a.fail(ExitUsage, err.Error())
@@ -1381,6 +1387,8 @@ type checkView struct {
 	TimeoutSeconds  int64  `json:"timeout_seconds,omitempty"`
 	Classification  string `json:"classification,omitempty"`
 	LogDigest       string `json:"log_digest,omitempty"`
+	Executed        *int   `json:"executed,omitempty"`
+	Skipped         *int   `json:"skipped,omitempty"`
 }
 
 type reportView struct {
@@ -1479,6 +1487,7 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 			Status: r.Status, EffectiveStatus: ch.effective(r, fp), ExitCode: r.ExitCode,
 			Cwd: r.Cwd, LogPath: r.LogPath, LogBytes: r.LogBytes, Preview: r.Preview, Note: r.Note,
 			TimeoutSeconds: r.TimeoutSeconds, Classification: r.Classification, LogDigest: r.LogDigest,
+			Executed: r.Executed, Skipped: r.Skipped,
 		}}, p.Checks...)
 	}
 	product := len(proj.Requirements) > 0
