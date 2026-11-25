@@ -325,6 +325,9 @@ func (c *Change) gate(p Project, fp Fingerprint, libs []*LibraryProblem) (string
 		if c.liveAccept("release", BindIntegration, c.Merge.SHA) == nil {
 			return "", []string{"还没有对这个集成版本的发布声明。声明不是工具读回"}
 		}
+		if !hasReleaseReadback(p) {
+			return "", []string{"启用了发布阶段，但没有必过的 release_readback。普通检查和发布声明都不能代替机器读回"}
+		}
 		bad := c.requiredFresh(p, GateRelease, fp)
 		if len(bad) > 0 {
 			return "", bad
@@ -355,6 +358,34 @@ func (c *Change) gate(p Project, fp Fingerprint, libs []*LibraryProblem) (string
 	default:
 		return "", []string{"未知阶段"}
 	}
+}
+
+func isReleaseReadback(ch CheckSpec) bool {
+	return ch.Required && ch.Gate == GateRelease && ch.Layer == "release_readback"
+}
+
+func hasReleaseReadback(p Project) bool {
+	for _, ch := range p.Checks {
+		if isReleaseReadback(ch) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Change) releaseReadbackVerified(p Project, fp Fingerprint) bool {
+	if !hasReleaseReadback(p) {
+		return false
+	}
+	for _, ch := range p.Checks {
+		if !isReleaseReadback(ch) {
+			continue
+		}
+		if _, why := c.satisfying(ch, p, fp); why != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func hasRequiredCheck(p Project, gate string) bool {

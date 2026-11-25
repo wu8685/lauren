@@ -1234,10 +1234,9 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 	if len(proj.Requirements) == 0 {
 		product = false
 	}
-	releaseVerified := false
+	releaseVerified := ch.releaseReadbackVerified(proj, fp)
 	var tool *VersionFact
-	if hasRequiredCheck(proj, GateRelease) {
-		releaseVerified = len(ch.requiredFresh(proj, GateRelease, fp)) == 0
+	if hasReleaseReadback(proj) {
 		for _, spec := range proj.Checks {
 			if spec.Layer != "release_readback" {
 				continue
