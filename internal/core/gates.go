@@ -283,6 +283,9 @@ func (c *Change) gate(root string, p Project, fp Fingerprint, libs []*LibraryPro
 		if len(bad) > 0 {
 			return "", bad
 		}
+		if why := c.redBlocked(p); why != "" {
+			return "", []string{why}
+		}
 		return StageAccept, nil
 	case StageAccept:
 		if fp.Kind != "ok" {
