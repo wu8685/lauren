@@ -38,7 +38,7 @@ func fingerprint(root string, proj Project) Fingerprint {
 	if err != nil && !strings.Contains(err.Error(), "exit status") {
 		return Fingerprint{Kind: "unknown", Note: "无法读取 git 树：" + err.Error()}
 	}
-	treeFiles, err := parseTreeZ(tree)
+	treeFiles, err := parseTreeZ(tree, proj)
 	if err != nil {
 		return Fingerprint{Kind: "unknown", Note: err.Error()}
 	}
@@ -54,7 +54,7 @@ func fingerprint(root string, proj Project) Fingerprint {
 	dirty := false
 	for _, ent := range entries {
 		path := filepath.ToSlash(ent.path)
-		if skipPath(path) || path == "lauren.project.json" {
+		if ignoredCandidate(path, proj) || path == "lauren.project.json" {
 			continue
 		}
 		dirty = true
@@ -100,6 +100,15 @@ func catalogHash(proj Project) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func ignoredCandidate(path string, proj Project) bool {
+	if skipPath(path) {
+		return true
+	}
+	p := strings.TrimPrefix(filepath.ToSlash(path), "./")
+	dir := proj.reportsDir()
+	return p == dir || strings.HasPrefix(p, dir+"/")
+}
+
 func skipPath(path string) bool {
 	p := strings.TrimPrefix(path, "./")
 	return p == ".lauren/runtime" || strings.HasPrefix(p, ".lauren/runtime/") || p == ".lauren/problems" || strings.HasPrefix(p, ".lauren/problems/") || p == ".lauren" || strings.HasPrefix(p, ".git/")
@@ -142,7 +151,7 @@ func parsePorcelainZ(data []byte) ([]porcelainEntry, error) {
 	return out, nil
 }
 
-func parseTreeZ(data []byte) ([]string, error) {
+func parseTreeZ(data []byte, proj Project) ([]string, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
@@ -156,7 +165,7 @@ func parseTreeZ(data []byte) ([]string, error) {
 			return nil, fmt.Errorf("无法解析 git ls-tree 的 NUL 记录")
 		}
 		path := filepath.ToSlash(string(rec[tab+1:]))
-		if skipPath(path) || path == "lauren.project.json" {
+		if ignoredCandidate(path, proj) || path == "lauren.project.json" {
 			continue
 		}
 		files = append(files, "blob "+string(rec))

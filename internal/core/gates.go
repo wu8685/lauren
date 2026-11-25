@@ -204,7 +204,7 @@ func validateArtifact(stage, level string, m map[string]any) error {
 	}
 }
 
-func (c *Change) requirementMet(req Requirement, proj Project, fp Fingerprint) (bool, string) {
+func (c *Change) requirementMet(root string, req Requirement, proj Project, fp Fingerprint) (bool, string) {
 	spec := findCheck(proj, req.Check)
 	if spec == nil {
 		return false, "要求 " + req.ID + " 指向不存在的检查 " + req.Check
@@ -216,6 +216,9 @@ func (c *Change) requirementMet(req Requirement, proj Project, fp Fingerprint) (
 		return false, "要求 " + req.ID + " 需要独立验收来源，自验检查 " + spec.Name + " 不能改名充当"
 	}
 	if _, why := c.satisfying(*spec, proj, fp); why != "" {
+		return false, why
+	}
+	if why := c.reportGate(root, proj, req, spec, fp); why != "" {
 		return false, why
 	}
 	return true, ""
@@ -247,7 +250,7 @@ func (c *Change) mergedNow() bool {
 	return c.Merge != nil && !c.Merge.Withdrawn && c.Merge.Branch == c.Policy.IntegrationBranch && c.Policy.IntegrationIntent == IntentBranch
 }
 
-func (c *Change) gate(p Project, fp Fingerprint, libs []*LibraryProblem) (string, []string) {
+func (c *Change) gate(root string, p Project, fp Fingerprint, libs []*LibraryProblem) (string, []string) {
 	if c.Status == StatusCancel {
 		return "", []string{"变更已取消"}
 	}
@@ -294,7 +297,7 @@ func (c *Change) gate(p Project, fp Fingerprint, libs []*LibraryProblem) (string
 			if !req.Required {
 				continue
 			}
-			ok, why := c.requirementMet(req, p, fp)
+			ok, why := c.requirementMet(root, req, p, fp)
 			if !ok {
 				bad = append(bad, why)
 			}
@@ -395,14 +398,14 @@ func (c *Change) gateChecksMet(p Project, gate string, fp Fingerprint) bool {
 	return len(c.requiredFresh(p, gate, fp)) == 0
 }
 
-func (c *Change) independentRequirementsMet(p Project, fp Fingerprint) bool {
+func (c *Change) independentRequirementsMet(root string, p Project, fp Fingerprint) bool {
 	found := false
 	for _, req := range p.Requirements {
 		if !req.Required || !req.Independent {
 			continue
 		}
 		found = true
-		ok, _ := c.requirementMet(req, p, fp)
+		ok, _ := c.requirementMet(root, req, p, fp)
 		if !ok {
 			return false
 		}
@@ -486,7 +489,7 @@ func validatePolicy(p Project, pol Policy) error {
 	return nil
 }
 
-func nextActions(c *Change, p Project, fp Fingerprint, libs []*LibraryProblem) []string {
+func nextActions(root string, c *Change, p Project, fp Fingerprint, libs []*LibraryProblem) []string {
 	if c == nil {
 		return []string{"创建变更"}
 	}
@@ -501,7 +504,7 @@ func nextActions(c *Change, p Project, fp Fingerprint, libs []*LibraryProblem) [
 	if c.Stage == StageBuild || c.Stage == StageAccept || c.Stage == StageRelease {
 		n = append(n, "运行检查")
 	}
-	if _, bad := c.gate(p, fp, libs); len(bad) == 0 {
+	if _, bad := c.gate(root, p, fp, libs); len(bad) == 0 {
 		n = append(n, "申请推进")
 	}
 	if stageIndex(c.Stage) > 0 {
