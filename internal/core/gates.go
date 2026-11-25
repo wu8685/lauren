@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -108,24 +109,43 @@ func envAccepted(spec CheckSpec, proj Project, env string) bool {
 }
 
 func (c *Change) satisfying(spec CheckSpec, proj Project, fp Fingerprint) (*CheckRun, string) {
-	var found *CheckRun
+	// 每个被接受的环境只看自己仍适用的最新一条。另一个环境或另一项检查的结果不覆盖它。
+	latest := map[string]int{}
 	for i := range c.Runs {
 		r := &c.Runs[i]
-		if r.Name != spec.Name || r.Status != "pass" {
+		if r.Name != spec.Name || !envAccepted(spec, proj, r.Environment) {
 			continue
 		}
-		if c.effective(*r, fp) != "pass" {
+		if c.effective(*r, fp) == "stale" {
 			continue
 		}
-		if !envAccepted(spec, proj, r.Environment) {
-			continue
-		}
-		found = r
+		latest[r.Environment] = i
 	}
-	if found == nil {
+	if len(latest) == 0 {
 		return nil, spec.Name + " 没有仍有效、且环境被接受的通过记录"
 	}
-	return found, ""
+	envs := make([]string, 0, len(latest))
+	for env := range latest {
+		envs = append(envs, env)
+	}
+	sort.Strings(envs)
+	var pass *CheckRun
+	var bad []string
+	for _, env := range envs {
+		r := &c.Runs[latest[env]]
+		eff := c.effective(*r, fp)
+		if eff == "pass" {
+			if pass == nil || !r.Ended.Before(pass.Ended) {
+				pass = r
+			}
+			continue
+		}
+		bad = append(bad, fmt.Sprintf("%s 在 %s 的最新结果是 %s，不能沿用更早的通过", spec.Name, env, eff))
+	}
+	if pass != nil {
+		return pass, ""
+	}
+	return nil, strings.Join(bad, "；")
 }
 
 func (c *Change) liveAccept(what, bindKind, key string) *Accept {

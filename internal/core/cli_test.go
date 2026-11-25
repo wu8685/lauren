@@ -882,3 +882,240 @@ func TestCheckTimeout(t *testing.T) {
 		}
 	})
 }
+
+func wantsAdvance(m map[string]any) bool {
+	for _, n := range m["next"].([]any) {
+		if n.(string) == "申请推进" {
+			return true
+		}
+	}
+	return false
+}
+
+func reachBuild(t *testing.T, dir, goal string) {
+	t.Helper()
+	must(t, dir, ExitOK, "change", "create", "--goal", goal)
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
+}
+
+func oneSelfProject(t *testing.T, dir string) {
+	t.Helper()
+	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{
+	  "schema": 1,
+	  "environments": ["development", "integration", "staging", "production"],
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main", "check_timeout_seconds": 1},
+	  "checks": [
+	    {"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/unit.sh"], "required": true, "environments": ["development", "integration"]},
+	    {"name": "static", "layer": "static", "gate": "self_verification", "argv": ["./checks/static.sh"], "required": false, "environments": ["development"]}
+	  ],
+	  "requirements": []
+	}`)
+	// 失败开关放在 runtime 里，候选指纹保持不变。这样旧通过不会因为改脚本而失效。
+	writeFile(t, filepath.Join(dir, "checks", "unit.sh"), "#!/bin/sh\nif [ -f .lauren/runtime/unit.mode ]; then exit \"$(cat .lauren/runtime/unit.mode)\"; fi\nif [ -f .lauren/runtime/unit.sleep ]; then sleep 30; fi\nexit 0\n")
+	writeFile(t, filepath.Join(dir, "checks", "static.sh"), "#!/bin/sh\nexit 0\n")
+	writeFile(t, filepath.Join(dir, "artifacts", "demand.json"), `{"goal":"g","acceptance":["a"],"baseline":"b"}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "plan.json"), `{"approach":"a","risks":"r","prechecks":["p"]}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "impl.json"), `{"summary":"s"}`)
+	gitInit(t, dir)
+}
+
+func TestLatestResultGates(t *testing.T) {
+	t.Run("passThenFailBlocks", func(t *testing.T) {
+		dir := t.TempDir()
+		oneSelfProject(t, dir)
+		reachBuild(t, dir, "先过后败")
+		must(t, dir, ExitOK, "check", "--name", "unit")
+		writeFile(t, filepath.Join(dir, ".lauren", "runtime", "unit.mode"), "1\n")
+		must(t, dir, ExitCheck, "check", "--name", "unit")
+		st := must(t, dir, ExitOK, "status")
+		if namedCheck(t, st, "unit")["effective_status"] != "fail" {
+			t.Fatalf("status 应显示最新失败: %#v", st["checks"])
+		}
+		nx := must(t, dir, ExitOK, "next")
+		if wantsAdvance(st) || wantsAdvance(nx) {
+			t.Fatal("最新失败后不应再建议推进")
+		}
+		_, m, errb := runAt(t, dir, "change", "advance")
+		if !strings.Contains(errText(m, errb), "最新结果") {
+			t.Fatalf("不能凭旧通过推进: %s", errText(m, errb))
+		}
+	})
+
+	t.Run("failThenPassAllows", func(t *testing.T) {
+		dir := t.TempDir()
+		oneSelfProject(t, dir)
+		reachBuild(t, dir, "先败后过")
+		writeFile(t, filepath.Join(dir, ".lauren", "runtime", "unit.mode"), "1\n")
+		must(t, dir, ExitCheck, "check", "--name", "unit")
+		os.Remove(filepath.Join(dir, ".lauren", "runtime", "unit.mode"))
+		must(t, dir, ExitOK, "check", "--name", "unit")
+		st := must(t, dir, ExitOK, "status")
+		if namedCheck(t, st, "unit")["effective_status"] != "pass" || !wantsAdvance(st) {
+			t.Fatal("同一环境失败后再通过，应可以推进")
+		}
+		if must(t, dir, ExitOK, "change", "advance")["stage"] != StageAccept {
+			t.Fatal("应进入验收")
+		}
+	})
+
+	t.Run("otherEnvAndOtherCheckDoNotClobber", func(t *testing.T) {
+		dir := t.TempDir()
+		oneSelfProject(t, dir)
+		reachBuild(t, dir, "环境分开")
+		must(t, dir, ExitOK, "check", "--name", "unit")
+		must(t, dir, ExitOK, "check", "--name", "static")
+		id := must(t, dir, ExitOK, "status")["id"].(string)
+		fp := must(t, dir, ExitOK, "status")["candidate"].(map[string]any)["hash"].(string)
+		err := WithChange(dir, id, func(ch *Change) error {
+			ch.Runs = append(ch.Runs, CheckRun{
+				ID: "r-other-env", Name: "unit", Layer: "unit", Gate: GateSelf, Environment: "integration",
+				Status: "fail", Started: time.Now().UTC(), Ended: time.Now().UTC(),
+				BindKind: BindWorktree, CandidateKind: "ok", Fingerprint: fp,
+				EvidenceGeneration: ch.EvidenceGeneration,
+			})
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := must(t, dir, ExitOK, "status")
+		var dev, integ, static map[string]any
+		for _, c := range st["checks"].([]any) {
+			cv := c.(map[string]any)
+			switch {
+			case cv["name"] == "unit" && cv["environment"] == "development":
+				dev = cv
+			case cv["name"] == "unit" && cv["environment"] == "integration":
+				integ = cv
+			case cv["name"] == "static":
+				static = cv
+			}
+		}
+		if dev["effective_status"] != "pass" || integ["effective_status"] != "fail" || static["effective_status"] != "pass" {
+			t.Fatalf("环境和检查不应互相覆盖: %#v", st["checks"])
+		}
+		if must(t, dir, ExitOK, "change", "advance")["stage"] != StageAccept {
+			t.Fatal("development 上最新仍是通过，应可以推进")
+		}
+	})
+
+	t.Run("partialTimeoutBlockedAndCancel", func(t *testing.T) {
+		dir := t.TempDir()
+		oneSelfProject(t, dir)
+		reachBuild(t, dir, "部分")
+		must(t, dir, ExitOK, "check", "--name", "unit")
+		writeFile(t, filepath.Join(dir, ".lauren", "runtime", "unit.mode"), "75\n")
+		must(t, dir, ExitCheck, "check", "--name", "unit")
+		if namedCheck(t, must(t, dir, ExitOK, "status"), "unit")["effective_status"] != "partial" {
+			t.Fatal("partial 应成为该环境的最新结果")
+		}
+		_, m, errb := runAt(t, dir, "change", "advance")
+		if !strings.Contains(errText(m, errb), "最新结果") {
+			t.Fatalf("partial 不能沿用旧通过: %s", errText(m, errb))
+		}
+		os.Remove(filepath.Join(dir, ".lauren", "runtime", "unit.mode"))
+		must(t, dir, ExitOK, "check", "--name", "unit")
+
+		writeFile(t, filepath.Join(dir, ".lauren", "runtime", "unit.sleep"), "1\n")
+		old := checkTimeoutUnit
+		checkTimeoutUnit = 200 * time.Millisecond
+		t.Cleanup(func() { checkTimeoutUnit = old })
+		must(t, dir, ExitCheck, "check", "--name", "unit")
+		checkTimeoutUnit = old
+		os.Remove(filepath.Join(dir, ".lauren", "runtime", "unit.sleep"))
+		got := namedCheck(t, must(t, dir, ExitOK, "status"), "unit")
+		if got["effective_status"] != "fail" || !strings.Contains(fmt.Sprint(got["note"]), "超时") {
+			t.Fatalf("超时应盖过旧通过: %#v", got)
+		}
+		_, m, errb = runAt(t, dir, "change", "advance")
+		if !strings.Contains(errText(m, errb), "最新结果") {
+			t.Fatalf("超时后不能推进: %s", errText(m, errb))
+		}
+
+		id := must(t, dir, ExitOK, "status")["id"].(string)
+		err := WithChange(dir, id, func(ch *Change) error {
+			ch.Runs = append(ch.Runs, CheckRun{
+				ID: "r-blocked", Name: "unit", Layer: "unit", Gate: GateSelf, Environment: "development",
+				Status: "blocked", Started: time.Now().UTC(), Ended: time.Now().UTC(),
+				BindKind: BindWorktree, CandidateKind: "ok", Fingerprint: ch.Runs[len(ch.Runs)-1].Fingerprint,
+				EvidenceGeneration: ch.EvidenceGeneration, Note: "未执行",
+			})
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if namedCheck(t, must(t, dir, ExitOK, "status"), "unit")["effective_status"] != "blocked" {
+			t.Fatal("同一环境更新的 blocked 应盖过更早的通过")
+		}
+		_, m, errb = runAt(t, dir, "change", "advance")
+		if !strings.Contains(errText(m, errb), "最新结果") {
+			t.Fatalf("blocked 不能沿用旧通过: %s", errText(m, errb))
+		}
+
+		id = must(t, dir, ExitOK, "status")["id"].(string)
+		must(t, dir, ExitOK, "change", "cancel", "--reason", "停下")
+		_, m, errb = runAt(t, dir, "change", "advance", "--id", id)
+		if !strings.Contains(errText(m, errb), "已取消") {
+			t.Fatalf("取消后不能推进: %s", errText(m, errb))
+		}
+	})
+
+	t.Run("candidateAndConfigStillStale", func(t *testing.T) {
+		dir := t.TempDir()
+		oneSelfProject(t, dir)
+		reachBuild(t, dir, "候选变了")
+		must(t, dir, ExitOK, "check", "--name", "unit")
+		writeFile(t, filepath.Join(dir, "app.txt"), "changed\n")
+		_, m, errb := runAt(t, dir, "change", "advance")
+		if !strings.Contains(errText(m, errb), "没有仍有效") && !strings.Contains(errText(m, errb), "最新结果") {
+			t.Fatalf("候选变化后旧通过不能推进: %s", errText(m, errb))
+		}
+		if namedCheck(t, must(t, dir, ExitOK, "status"), "unit")["effective_status"] == "pass" {
+			t.Fatal("未跟踪文件变化后证据应失效")
+		}
+	})
+
+	t.Run("releaseReadbackUsesLatest", func(t *testing.T) {
+		dir := t.TempDir()
+		project(t, dir, ReleaseIncluded)
+		writeFile(t, filepath.Join(dir, "checks", "read-version.sh"), "#!/bin/sh\nif [ -f .lauren/runtime/version.fail ]; then exit 1; fi\necho version=0.1.0\n")
+		gitInit(t, dir)
+		must(t, dir, ExitOK, "change", "create", "--goal", "读回")
+		walkBuild(t, dir)
+		must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/accept.json")
+		must(t, dir, ExitOK, "check", "--name", "interact", "--environment", "integration")
+		must(t, dir, ExitOK, "change", "accept", "--what", "delivery", "--source", "human", "--reason", "接受", "--scope", "fixture")
+		sha := strings.TrimSpace(gitSHA(t, dir))
+		must(t, dir, ExitOK, "change", "integration", "record", "--sha", sha, "--reason", "假定已合入")
+		must(t, dir, ExitOK, "change", "advance")
+		must(t, dir, ExitOK, "check", "--name", "version", "--environment", "staging")
+		must(t, dir, ExitOK, "change", "accept", "--what", "release", "--source", "human", "--reason", "声明", "--scope", "fixture")
+		must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/release.json")
+		writeFile(t, filepath.Join(dir, ".lauren", "runtime", "version.fail"), "1\n")
+		must(t, dir, ExitCheck, "check", "--name", "version", "--environment", "staging")
+		st := must(t, dir, ExitOK, "status")
+		if namedCheck(t, st, "version")["effective_status"] != "fail" {
+			t.Fatalf("发布读回应记下最新失败: %#v", st["checks"])
+		}
+		if st["stage"] == StageRetro {
+			t.Fatal("最新读回失败不能进入复盘")
+		}
+		// 失败会回到实现与自验。自验仍有效时可以再回到发布，但不能靠更早的读回通过离开发布。
+		if st["stage"] == StageBuild {
+			must(t, dir, ExitOK, "change", "advance")
+			must(t, dir, ExitOK, "change", "advance")
+		}
+		if must(t, dir, ExitOK, "status")["stage"] != StageRelease {
+			t.Fatal("应能回到发布阶段，再用最新读回做门禁")
+		}
+		_, m, errb := runAt(t, dir, "change", "advance")
+		if !strings.Contains(errText(m, errb), "最新结果") {
+			t.Fatalf("发布读回应使用同一规则: %s", errText(m, errb))
+		}
+	})
+}
