@@ -337,8 +337,9 @@ func TestCatalogNotDefaults(t *testing.T) {
 	}
 	st = must(t, dir, ExitOK, "status")
 	for _, c := range st["checks"].([]any) {
-		if c.(map[string]any)["effective_status"] != "stale" && c.(map[string]any)["effective_status"] != "blocked" {
-			t.Fatalf("改 checks 应作废证据: %#v", c)
+		cv := c.(map[string]any)
+		if cv["name"] == "unit" && cv["effective_status"] != "pass" {
+			t.Fatalf("冻结之后再改项目 checks，不应改这次计划，也不应作废已有证据: %#v", cv)
 		}
 	}
 }
@@ -859,8 +860,8 @@ func TestCheckTimeout(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "lauren.project.json"), []byte(text), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if namedCheck(t, must(t, dir, ExitOK, "status"), "unit")["effective_status"] != "stale" {
-			t.Fatal("改项目默认超时后，旧的通过不能继续有效")
+		if namedCheck(t, must(t, dir, ExitOK, "status"), "unit")["effective_status"] != "pass" {
+			t.Fatal("冻结后的超时不跟随项目默认值，旧通过仍然有效")
 		}
 
 		dir = t.TempDir()
@@ -877,8 +878,8 @@ func TestCheckTimeout(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "lauren.project.json"), []byte(text), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if namedCheck(t, must(t, dir, ExitOK, "status"), "unit")["effective_status"] != "stale" {
-			t.Fatal("改单项超时后，旧的通过不能继续有效")
+		if namedCheck(t, must(t, dir, ExitOK, "status"), "unit")["effective_status"] != "pass" {
+			t.Fatal("冻结后的单项超时不跟随项目配置")
 		}
 	})
 }

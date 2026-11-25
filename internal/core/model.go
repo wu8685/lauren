@@ -103,25 +103,45 @@ type Policy struct {
 }
 
 type Change struct {
-	ID                 string       `json:"id"`
-	Goal               string       `json:"goal"`
-	Stage              string       `json:"stage"`
-	Status             string       `json:"status"`
-	Policy             Policy       `json:"policy"`
-	CatalogHash        string       `json:"catalog_hash"`
-	EvidenceGeneration int          `json:"evidence_generation"`
-	Artifacts          []Artifact   `json:"artifacts"`
-	Runs               []CheckRun   `json:"runs"`
-	Reports            []QAReport   `json:"reports,omitempty"`
-	Problems           []Problem    `json:"problems"`
-	Accepts            []Accept     `json:"accepts"`
-	DeclaredVersion    *VersionFact `json:"declared_version,omitempty"`
-	Merge              *MergeRecord `json:"merge,omitempty"`
-	ReleaseHold        *ReleaseHold `json:"release_hold,omitempty"`
-	Block              *BlockInfo   `json:"block,omitempty"`
-	History            []Event      `json:"history"`
-	CreatedAt          time.Time    `json:"created_at"`
-	RedSkip            *RedSkip     `json:"red_skip,omitempty"`
+	ID                 string        `json:"id"`
+	Goal               string        `json:"goal"`
+	Stage              string        `json:"stage"`
+	Status             string        `json:"status"`
+	Policy             Policy        `json:"policy"`
+	CatalogHash        string        `json:"catalog_hash"`
+	EvidenceGeneration int           `json:"evidence_generation"`
+	Artifacts          []Artifact    `json:"artifacts"`
+	Runs               []CheckRun    `json:"runs"`
+	Reports            []QAReport    `json:"reports,omitempty"`
+	Problems           []Problem     `json:"problems"`
+	Accepts            []Accept      `json:"accepts"`
+	DeclaredVersion    *VersionFact  `json:"declared_version,omitempty"`
+	Merge              *MergeRecord  `json:"merge,omitempty"`
+	ReleaseHold        *ReleaseHold  `json:"release_hold,omitempty"`
+	Block              *BlockInfo    `json:"block,omitempty"`
+	History            []Event       `json:"history"`
+	CreatedAt          time.Time     `json:"created_at"`
+	RedSkip            *RedSkip      `json:"red_skip,omitempty"`
+	Plan               *CheckPlan    `json:"plan,omitempty"`
+	PlanPending        *PlanProposal `json:"plan_pending,omitempty"`
+}
+
+type CheckPlan struct {
+	Authorized     []CheckSpec    `json:"authorized"`
+	Checks         []CheckSpec    `json:"checks"`
+	Skips          []SkippedCheck `json:"skips,omitempty"`
+	TimeoutSeconds int64          `json:"timeout_seconds"`
+}
+
+type SkippedCheck struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+type PlanProposal struct {
+	Skip    []SkippedCheck `json:"skip,omitempty"`
+	Include []string       `json:"include,omitempty"`
+	At      time.Time      `json:"at"`
 }
 
 type Artifact struct {
