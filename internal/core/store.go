@@ -339,6 +339,11 @@ func (p Project) validate() error {
 	if err := validateReportsDir(d.ReportsDir); err != nil {
 		return err
 	}
+	switch d.RedGate {
+	case "", "off", "required":
+	default:
+		return fmt.Errorf("defaults.red_gate 只能是 off 或 required")
+	}
 	for _, ch := range p.Checks {
 		switch ch.Gate {
 		case GateSelf, GateAcceptance, GateRelease:

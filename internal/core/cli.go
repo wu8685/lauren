@@ -174,7 +174,7 @@ func ensureGitignore(root string) error {
 
 func (a *app) cmdChange(args []string) int {
 	if len(args) == 0 {
-		return a.fail(ExitUsage, "用法：lauren change create|submit|advance|rollback|block|resume|cancel|accept|declare-version|policy|integration|release|problem|report")
+		return a.fail(ExitUsage, "用法：lauren change create|submit|advance|rollback|block|resume|cancel|accept|declare-version|policy|integration|release|problem|report|red")
 	}
 	switch args[0] {
 	case "create":
@@ -205,6 +205,8 @@ func (a *app) cmdChange(args []string) int {
 		return a.changeProblem(args[1:])
 	case "report":
 		return a.changeReport(args[1:])
+	case "red":
+		return a.changeRed(args[1:])
 	case "stage", "pass":
 		return a.fail(ExitUsage, "没有直接设置阶段或填写 pass 的命令")
 	default:
@@ -275,6 +277,31 @@ func (a *app) changeReport(args []string) int {
 		})
 		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "report", Message: req.ID + " " + rel + " " + *source})
 		return ExitOK, a.payload(root, "change report submit", ch, proj, fp)
+	})
+}
+
+func (a *app) changeRed(args []string) int {
+	if len(args) == 0 || args[0] != "skip" {
+		return a.fail(ExitUsage, "用法：lauren change red skip --reason ...")
+	}
+	fs := flag.NewFlagSet("red skip", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	id := fs.String("id", "", "")
+	reason := fs.String("reason", "", "")
+	if err := fs.Parse(args[1:]); err != nil {
+		return ExitUsage
+	}
+	if strings.TrimSpace(*reason) == "" {
+		return a.fail(ExitUsage, "跳过 Red 门禁需要 --reason")
+	}
+	root, _ := a.projectRoot()
+	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
+		if ch.Status != StatusActive {
+			return a.fail(ExitGate, "只有进行中的变更可以跳过 Red 门禁"), nil
+		}
+		ch.RedSkip = &RedSkip{Reason: strings.TrimSpace(*reason), At: time.Now().UTC()}
+		ch.History = append(ch.History, Event{At: ch.RedSkip.At, Kind: "red-skip", Message: ch.RedSkip.Reason})
+		return ExitOK, a.payload(root, "change red skip", ch, proj, fp)
 	})
 }
 
@@ -1218,6 +1245,8 @@ type checkView struct {
 	Preview         string `json:"preview,omitempty"`
 	Note            string `json:"note,omitempty"`
 	TimeoutSeconds  int64  `json:"timeout_seconds,omitempty"`
+	Classification  string `json:"classification,omitempty"`
+	LogDigest       string `json:"log_digest,omitempty"`
 }
 
 type reportView struct {
@@ -1242,6 +1271,13 @@ type problemView struct {
 	Count         int    `json:"count"`
 	Status        string `json:"status"`
 	PromotedCheck string `json:"promoted_check,omitempty"`
+}
+
+type redState struct {
+	Required   bool   `json:"required"`
+	Recorded   bool   `json:"recorded"`
+	Skipped    bool   `json:"skipped"`
+	SkipReason string `json:"skip_reason,omitempty"`
 }
 
 type facts struct {
@@ -1274,6 +1310,7 @@ type statusPayload struct {
 	DeclaredVersion *VersionFact  `json:"declared_version,omitempty"`
 	ToolVersion     *VersionFact  `json:"tool_version,omitempty"`
 	Facts           *facts        `json:"facts,omitempty"`
+	Red             *redState     `json:"red,omitempty"`
 	Checks          []checkView   `json:"checks,omitempty"`
 	Problems        []problemView `json:"problems,omitempty"`
 	Reports         []reportView  `json:"reports,omitempty"`
@@ -1306,7 +1343,7 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 			Name: r.Name, Layer: r.Layer, Gate: r.Gate, Environment: r.Environment,
 			Status: r.Status, EffectiveStatus: ch.effective(r, fp), ExitCode: r.ExitCode,
 			Cwd: r.Cwd, LogPath: r.LogPath, LogBytes: r.LogBytes, Preview: r.Preview, Note: r.Note,
-			TimeoutSeconds: r.TimeoutSeconds,
+			TimeoutSeconds: r.TimeoutSeconds, Classification: r.Classification, LogDigest: r.LogDigest,
 		}}, p.Checks...)
 	}
 	product := len(proj.Requirements) > 0
@@ -1365,6 +1402,11 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 			Fresh: fresh, Note: note,
 		})
 	}
+	p.Red = &redState{Required: proj.redRequired(), Recorded: ch.redRecorded()}
+	if ch.RedSkip != nil && strings.TrimSpace(ch.RedSkip.Reason) != "" {
+		p.Red.Skipped = true
+		p.Red.SkipReason = ch.RedSkip.Reason
+	}
 	for _, pb := range libsFor(root, ch) {
 		p.Problems = append(p.Problems, problemView{
 			ID: pb.ID, Summary: pb.Title, Disposition: pb.Disposition, Reason: pb.Reason,
@@ -1398,6 +1440,13 @@ func writeHuman(w io.Writer, p statusPayload) {
 	}
 	if p.ReleaseHold {
 		fmt.Fprintln(w, "共享环境占用: 是")
+	}
+	if p.Red != nil && p.Red.Required {
+		fmt.Fprintf(w, "Red 门禁: 已记录=%t 已跳过=%t", p.Red.Recorded, p.Red.Skipped)
+		if p.Red.SkipReason != "" {
+			fmt.Fprintf(w, " 理由=%s", p.Red.SkipReason)
+		}
+		fmt.Fprintln(w)
 	}
 	if p.Facts != nil {
 		fmt.Fprintf(w, "结果已记录: %t\n交付已接受: %t\n交付来源声明: %s\n来源身份已验证: %t（身份未验证）\n发布已声明: %t（不是机器读回）\n发布已由工具读回: %t\n已配置要求有通过记录: %t（不是独立验收）\n必过自验已通过: %t\n必过验收检查已通过: %t\n独立要求有通过记录: %t\n",

@@ -71,6 +71,7 @@ type Defaults struct {
 	PromoteThreshold    int    `json:"promote_threshold,omitempty"`
 	CheckTimeoutSeconds int64  `json:"check_timeout_seconds,omitempty"`
 	ReportsDir          string `json:"reports_dir,omitempty"`
+	RedGate             string `json:"red_gate,omitempty"`
 }
 
 type CheckSpec struct {
@@ -120,6 +121,7 @@ type Change struct {
 	Block              *BlockInfo   `json:"block,omitempty"`
 	History            []Event      `json:"history"`
 	CreatedAt          time.Time    `json:"created_at"`
+	RedSkip            *RedSkip     `json:"red_skip,omitempty"`
 }
 
 type Artifact struct {
@@ -157,6 +159,13 @@ type CheckRun struct {
 	CandidateKind      string    `json:"candidate_kind"`
 	Note               string    `json:"note,omitempty"`
 	TimeoutSeconds     int64     `json:"timeout_seconds,omitempty"`
+	Classification     string    `json:"classification,omitempty"`
+	LogDigest          string    `json:"log_digest,omitempty"`
+}
+
+type RedSkip struct {
+	Reason string    `json:"reason"`
+	At     time.Time `json:"at"`
 }
 
 type QAReport struct {

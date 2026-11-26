@@ -3,6 +3,8 @@ package core
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -85,6 +87,9 @@ func runCheck(root, changeID string, proj Project, spec CheckSpec, fp Fingerprin
 	run.LogPath = logPath
 	run.LogBytes = len(raw)
 	run.Preview = preview(raw, 180)
+	sum := sha256.Sum256([]byte(raw))
+	run.LogDigest = hex.EncodeToString(sum[:])
+	run.Classification = classificationFromLog(raw)
 	run.Ended = time.Now().UTC()
 	if ctx.Err() == context.DeadlineExceeded {
 		run.Status = "fail"
@@ -110,6 +115,66 @@ func runCheck(root, changeID string, proj Project, spec CheckSpec, fp Fingerprin
 	run.Status = "fail"
 	run.Note = err.Error()
 	return run
+}
+
+var classLine = regexp.MustCompile(`^lauren-class classification=([a-z][a-z0-9_]{0,40})$`)
+
+func classificationFromLog(raw string) string {
+	found := ""
+	for _, line := range strings.Split(raw, "\n") {
+		if m := classLine.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			found = m[1]
+		}
+	}
+	return found
+}
+
+func (p Project) redRequired() bool {
+	return p.Defaults.RedGate == "required"
+}
+
+func redClassification(kind string) bool {
+	switch kind {
+	case "assertion_fail", "behavior_fail":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Change) redRecorded() bool {
+	fails := map[string]time.Time{}
+	for i := range c.Runs {
+		r := &c.Runs[i]
+		if r.Status == "fail" && redClassification(r.Classification) {
+			if prev, ok := fails[r.Name]; !ok || r.Ended.After(prev) {
+				fails[r.Name] = r.Ended
+			}
+		}
+	}
+	for i := range c.Runs {
+		r := &c.Runs[i]
+		if r.Status != "pass" {
+			continue
+		}
+		if failedAt, ok := fails[r.Name]; ok && r.Ended.After(failedAt) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Change) redBlocked(p Project) string {
+	if !p.redRequired() {
+		return ""
+	}
+	if c.RedSkip != nil && strings.TrimSpace(c.RedSkip.Reason) != "" {
+		return ""
+	}
+	if c.redRecorded() {
+		return ""
+	}
+	return "启用了 Red 门禁，但没有先失败再通过的记录。失败结果要带脚本写的 lauren-class classification=assertion_fail 或 behavior_fail。可以 change red skip --reason 显式跳过"
 }
 
 func preview(s string, n int) string {
