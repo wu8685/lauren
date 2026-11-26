@@ -8,7 +8,7 @@ description: 用 lauren CLI 推进一次有明确目标的变更。适用于明�
 门禁只在 `lauren` 命令的退出码和 `status` / `next` 里。本 Skill 不复制通过条件，也不根据对话判断需求是否正确。
 
 1. 在含有 `lauren.project.json` 的项目根目录工作。该目录必须是 git 根。
-2. 创建变更：`lauren change create --goal "<目标>"`。需要覆盖项目默认值时，用 `--environment`、`--release-stage included|excluded`、`--artifact-level standard|abbreviated`、`--integration-branch` 或 `--integration-intent not_in_current_iteration`。
+2. 创建变更：`lauren change create --goal "<目标>"`。需要覆盖项目默认值时，用 `--environment`、`--release-stage included|excluded`、`--artifact-level standard|abbreviated`、`--integration-branch` 或 `--integration-intent not_in_current_iteration`。可选检查可以 `--skip 名称=理由`。必过检查不能跳过。创建时会把检查计划冻住。过了明确需求就不能直接改计划。先 `change plan propose`，然后请用户自己执行 `change plan confirm --owner-confirmed`。不要自己加上 `--owner-confirmed`。
 3. 用 `lauren next` 看下一合法动作，用 `lauren status` 看阶段、policy、检查环境和几件分开的事实。
 4. 当前阶段产物用 `lauren change submit --artifact <项目内相对路径>` 提交。精简记录也不取消必过检查。
 5. 检查用 `lauren check`，环境默认是这次流程的 `policy.environment`，也可以 `--environment`。命令来自项目配置，不要把任务文本拼成 shell，也不要另造一个通过结果。单项检查默认 600 秒，由 `defaults.check_timeout_seconds` 和检查上的 `timeout_seconds` 决定。超时是失败。没有临时改超时的命令。候选指纹会看见带引号、空格或换行的路径变化；读不了的路径不能当成通过。失败分类只能由检查脚本写 `lauren-class classification=...`，不要自己编一个分类。项目把 `defaults.red_gate` 设成 `required` 时，离开实现与自验前要有先失败再通过的记录；跳过必须 `change red skip --reason`，理由会留在状态里。

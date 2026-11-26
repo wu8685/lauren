@@ -174,7 +174,7 @@ func ensureGitignore(root string) error {
 
 func (a *app) cmdChange(args []string) int {
 	if len(args) == 0 {
-		return a.fail(ExitUsage, "用法：lauren change create|submit|advance|rollback|block|resume|cancel|accept|declare-version|policy|integration|release|problem|report|red")
+		return a.fail(ExitUsage, "用法：lauren change create|submit|advance|rollback|block|resume|cancel|accept|declare-version|policy|integration|release|problem|report|red|plan")
 	}
 	switch args[0] {
 	case "create":
@@ -207,6 +207,8 @@ func (a *app) cmdChange(args []string) int {
 		return a.changeReport(args[1:])
 	case "red":
 		return a.changeRed(args[1:])
+	case "plan":
+		return a.changePlan(args[1:])
 	case "stage", "pass":
 		return a.fail(ExitUsage, "没有直接设置阶段或填写 pass 的命令")
 	default:
@@ -318,11 +320,12 @@ func (a *app) withChange(id string, fn func(*Change, Project, Fingerprint) (int,
 	if err != nil {
 		return a.fail(ExitUsage, err.Error())
 	}
-	fp := fingerprint(root, proj)
+	var fp Fingerprint
 	var code int
 	var payload any
 	err = WithChange(root, id, func(ch *Change) error {
 		ch.syncCatalog(proj)
+		fp = fingerprint(root, ch.projectView(proj))
 		code, payload = fn(ch, proj, fp)
 		return nil
 	})
@@ -352,6 +355,8 @@ func (a *app) changeCreate(args []string) int {
 	level := fs.String("artifact-level", "", "standard 或 abbreviated")
 	branch := fs.String("integration-branch", "", "覆盖集成分支")
 	intent := fs.String("integration-intent", "", "branch 或 not_in_current_iteration")
+	var skips skipArgs
+	fs.Var(&skips, "skip", "可选检查，格式 名称=理由，可重复")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
@@ -374,10 +379,14 @@ func (a *app) changeCreate(args []string) int {
 	if err := validatePolicy(proj, pol); err != nil {
 		return a.fail(ExitUsage, err.Error())
 	}
+	plan, err := proj.freezePlan(skips)
+	if err != nil {
+		return a.fail(ExitUsage, err.Error())
+	}
 	now := time.Now().UTC()
 	created := Change{
 		ID: newID("c-"), Goal: *goal, Stage: StageDemand, Status: StatusActive, Policy: pol,
-		CatalogHash: catalogHash(proj), CreatedAt: now,
+		Plan: plan, CatalogHash: catalogHash(projectWithPlan(proj, plan)), CreatedAt: now,
 		History: []Event{{At: now, Kind: "create", Message: *goal}},
 	}
 	if err := createChange(root, &created); err != nil {
@@ -389,6 +398,130 @@ func (a *app) changeCreate(args []string) int {
 	fmt.Fprintf(a.out, "变更 %s\n阶段: %s\n环境: %s\n发布阶段: %s\n产物级别: %s\n集成: %s %s\n",
 		created.ID, created.Stage, pol.Environment, pol.ReleaseStage, pol.ArtifactLevel, pol.IntegrationIntent, pol.IntegrationBranch)
 	return ExitOK
+}
+
+func (a *app) changePlan(args []string) int {
+	if len(args) == 0 {
+		return a.fail(ExitUsage, "用法：lauren change plan skip|include|propose|confirm")
+	}
+	switch args[0] {
+	case "skip", "include":
+		return a.planEdit(args[0], args[1:])
+	case "propose":
+		return a.planPropose(args[1:])
+	case "confirm":
+		return a.planConfirm(args[1:])
+	default:
+		return a.fail(ExitUsage, "未知 plan 子命令 "+args[0])
+	}
+}
+
+func (a *app) planEdit(kind string, args []string) int {
+	fs := flag.NewFlagSet("plan "+kind, flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	id := fs.String("id", "", "")
+	name := fs.String("name", "", "")
+	reason := fs.String("reason", "", "")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if strings.TrimSpace(*name) == "" || (kind == "skip" && strings.TrimSpace(*reason) == "") {
+		return a.fail(ExitUsage, "需要 --name；跳过还需要 --reason")
+	}
+	root, _ := a.projectRoot()
+	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
+		if ch.Status != StatusActive || ch.Plan == nil {
+			return a.fail(ExitGate, "没有可修改的冻结计划"), nil
+		}
+		if ch.planLocked() {
+			return a.fail(ExitGate, "过了明确需求，不能直接改计划。先 change plan propose，再由所有者 change plan confirm --owner-confirmed"), nil
+		}
+		next := ch.Plan.clone()
+		var err error
+		if kind == "skip" {
+			err = next.skip(*name, *reason)
+		} else {
+			err = next.include(*name)
+		}
+		if err != nil {
+			return a.fail(ExitUsage, err.Error()), nil
+		}
+		ch.Plan = next
+		ch.invalidateEvidence()
+		ch.CatalogHash = catalogHash(ch.projectView(proj))
+		ch.notePlan(time.Now().UTC(), kind+" "+*name)
+		return ExitOK, a.payload(root, "change plan "+kind, ch, proj, fp)
+	})
+}
+
+func (a *app) planPropose(args []string) int {
+	fs := flag.NewFlagSet("plan propose", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	id := fs.String("id", "", "")
+	var skips skipArgs
+	var includes includeArgs
+	fs.Var(&skips, "skip", "名称=理由")
+	fs.Var(&includes, "include", "授权检查名称")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if len(skips) == 0 && len(includes) == 0 {
+		return a.fail(ExitUsage, "propose 需要 --skip 或 --include")
+	}
+	var parsed []SkippedCheck
+	for _, raw := range skips {
+		name, reason, err := parseSkip(raw)
+		if err != nil {
+			return a.fail(ExitUsage, err.Error())
+		}
+		parsed = append(parsed, SkippedCheck{Name: name, Reason: reason})
+	}
+	root, _ := a.projectRoot()
+	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
+		if ch.Status != StatusActive || ch.Plan == nil {
+			return a.fail(ExitGate, "没有可修改的冻结计划"), nil
+		}
+		if !ch.planLocked() {
+			return a.fail(ExitGate, "明确需求阶段可以直接 change plan skip 或 include"), nil
+		}
+		trial := ch.Plan.clone()
+		prop := PlanProposal{Skip: parsed, Include: includes, At: time.Now().UTC()}
+		if err := trial.apply(prop); err != nil {
+			return a.fail(ExitUsage, err.Error()), nil
+		}
+		ch.PlanPending = &prop
+		ch.notePlan(prop.At, "提出计划变更，等待所有者确认")
+		return ExitOK, a.payload(root, "change plan propose", ch, proj, fp)
+	})
+}
+
+func (a *app) planConfirm(args []string) int {
+	fs := flag.NewFlagSet("plan confirm", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	id := fs.String("id", "", "")
+	owner := fs.Bool("owner-confirmed", false, "所有者本人确认。agent 不得自行加上这个参数")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if !*owner {
+		return a.fail(ExitUsage, "确认计划变更需要 --owner-confirmed。agent 不得自己加上这个参数，要请所有者执行")
+	}
+	root, _ := a.projectRoot()
+	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
+		if ch.PlanPending == nil || ch.Plan == nil {
+			return a.fail(ExitGate, "没有待确认的计划变更"), nil
+		}
+		next := ch.Plan.clone()
+		if err := next.apply(*ch.PlanPending); err != nil {
+			return a.fail(ExitUsage, err.Error()), nil
+		}
+		ch.Plan = next
+		ch.PlanPending = nil
+		ch.invalidateEvidence()
+		ch.CatalogHash = catalogHash(ch.projectView(proj))
+		ch.notePlan(time.Now().UTC(), "所有者确认了计划变更，相关证据作废")
+		return ExitOK, a.payload(root, "change plan confirm", ch, proj, fp)
+	})
 }
 
 func (a *app) changeSubmit(args []string) int {
@@ -901,7 +1034,7 @@ func (a *app) problemAdd(args []string) int {
 		}
 		if promoted {
 			ch.invalidateEvidence()
-			ch.CatalogHash = catalogHash(proj)
+			ch.CatalogHash = catalogHash(ch.projectView(proj))
 		}
 		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "problem", Message: pb.ID + " count=" + fmt.Sprint(pb.Count)})
 		return ExitOK, a.payload(root, "change problem add", ch, proj, fp)
@@ -1044,19 +1177,20 @@ func (a *app) cmdCheck(args []string) int {
 	if !containsStr(proj.Environments, env) {
 		return a.fail(ExitUsage, "环境 "+env+" 不在项目 environments 里")
 	}
+	active := ch0.checks(proj)
 	var specs []CheckSpec
-	for _, ch := range proj.Checks {
+	for _, ch := range active {
 		if *name == "" || ch.Name == *name {
 			specs = append(specs, ch)
 		}
 	}
 	if *name != "" && len(specs) == 0 {
-		return a.fail(ExitUsage, "配置里没有检查 "+*name)
+		return a.fail(ExitUsage, "这次变更的计划里没有检查 "+*name)
 	}
-	if len(proj.Checks) == 0 {
-		return a.fail(ExitUsage, "项目配置没有检查命令")
+	if len(active) == 0 {
+		return a.fail(ExitUsage, "这次变更的计划里没有检查命令")
 	}
-	fp := fingerprint(root, proj)
+	fp := fingerprint(root, ch0.projectView(proj))
 	var runs []CheckRun
 	for _, spec := range specs {
 		if spec.Gate == GateRelease || spec.Layer == "release_readback" {
@@ -1090,7 +1224,7 @@ func (a *app) cmdCheck(args []string) int {
 		}
 		runs = append(runs, runCheck(root, cid, proj, spec, fp, ch0.EvidenceGeneration, env, "", ""))
 	}
-	fpAfter := fingerprint(root, proj)
+	fpAfter := fingerprint(root, ch0.projectView(proj))
 	code := ExitOK
 	err = WithChange(root, cid, func(ch *Change) error {
 		ch.syncCatalog(proj)
@@ -1199,7 +1333,7 @@ func (a *app) show(cmd string, id idFlag, hist bool) int {
 	var payload statusPayload
 	err = WithChange(root, cid, func(ch *Change) error {
 		ch.syncCatalog(proj)
-		fp := fingerprint(root, proj)
+		fp := fingerprint(root, ch.projectView(proj))
 		payload = a.payload(root, cmd, ch, proj, fp)
 		if hist {
 			payload.History = ch.History
@@ -1315,6 +1449,7 @@ type statusPayload struct {
 	Problems        []problemView `json:"problems,omitempty"`
 	Reports         []reportView  `json:"reports,omitempty"`
 	Next            []string      `json:"next,omitempty"`
+	PlanPending     *PlanProposal `json:"plan_pending,omitempty"`
 	History         []Event       `json:"history,omitempty"`
 	Trust           string        `json:"trust,omitempty"`
 }
@@ -1323,7 +1458,7 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 	p := statusPayload{
 		OK: true, Command: cmd, ID: ch.ID, Goal: ch.Goal, Stage: ch.Stage, Status: ch.Status,
 		Policy: &ch.Policy, Candidate: fp, Merge: ch.Merge, DeclaredVersion: ch.DeclaredVersion,
-		Next:  nextActions(root, ch, proj, fp, libsFor(root, ch)),
+		Next: nextActions(root, ch, proj, fp, libsFor(root, ch)), PlanPending: ch.PlanPending,
 		Trust: "本地状态文件可以被改写。这个 CLI 不认证人类，也不能防止恶意篡改。合并是否可信看仓库 CI 重跑；交付是否接受看来源被明确记下的接受记录。不会自动 merge、push、部署或通知。",
 	}
 	if ch.Block != nil && ch.Status == StatusBlocked {
@@ -1361,8 +1496,8 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 	}
 	releaseVerified := ch.releaseReadbackVerified(proj, fp)
 	var tool *VersionFact
-	if hasReleaseReadback(proj) {
-		for _, spec := range proj.Checks {
+	if hasReleaseReadback(ch.checks(proj)) {
+		for _, spec := range ch.checks(proj) {
 			if spec.Layer != "release_readback" {
 				continue
 			}

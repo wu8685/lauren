@@ -271,7 +271,7 @@ func promoteDue(root string, proj *Project, ch *Change) (bool, error) {
 	}
 	if changed {
 		ch.invalidateEvidence()
-		ch.CatalogHash = catalogHash(*proj)
+		ch.CatalogHash = catalogHash(ch.projectView(*proj))
 	}
 	return changed, nil
 }

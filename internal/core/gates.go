@@ -11,7 +11,7 @@ import (
 )
 
 func (c *Change) syncCatalog(proj Project) {
-	h := catalogHash(proj)
+	h := catalogHash(c.projectView(proj))
 	if c.CatalogHash == "" {
 		c.CatalogHash = h
 		return
@@ -205,7 +205,7 @@ func validateArtifact(stage, level string, m map[string]any) error {
 }
 
 func (c *Change) requirementMet(root string, req Requirement, proj Project, fp Fingerprint) (bool, string) {
-	spec := findCheck(proj, req.Check)
+	spec := lookupCheck(c.checks(proj), req.Check)
 	if spec == nil {
 		return false, "要求 " + req.ID + " 指向不存在的检查 " + req.Check
 	}
@@ -225,9 +225,13 @@ func (c *Change) requirementMet(root string, req Requirement, proj Project, fp F
 }
 
 func findCheck(p Project, name string) *CheckSpec {
-	for i := range p.Checks {
-		if p.Checks[i].Name == name {
-			return &p.Checks[i]
+	return lookupCheck(p.Checks, name)
+}
+
+func lookupCheck(checks []CheckSpec, name string) *CheckSpec {
+	for i := range checks {
+		if checks[i].Name == name {
+			return &checks[i]
 		}
 	}
 	return nil
@@ -235,7 +239,7 @@ func findCheck(p Project, name string) *CheckSpec {
 
 func (c *Change) requiredFresh(p Project, gate string, fp Fingerprint) []string {
 	var bad []string
-	for _, ch := range p.Checks {
+	for _, ch := range c.checks(p) {
 		if ch.Gate != gate || !ch.Required {
 			continue
 		}
@@ -276,7 +280,7 @@ func (c *Change) gate(root string, p Project, fp Fingerprint, libs []*LibraryPro
 		if fp.Kind != "ok" {
 			return "", []string{fp.Note}
 		}
-		if !hasRequiredCheck(p, GateSelf) {
+		if !hasRequiredCheck(c.checks(p), GateSelf) {
 			return "", []string{"没有配置必过的自验检查。空检查配置不能通过实现与自验"}
 		}
 		bad := c.requiredFresh(p, GateSelf, fp)
@@ -292,7 +296,7 @@ func (c *Change) gate(root string, p Project, fp Fingerprint, libs []*LibraryPro
 			return "", []string{fp.Note}
 		}
 		var bad []string
-		if !hasRequiredCheck(p, GateAcceptance) && !hasRequiredRequirement(p) {
+		if !hasRequiredCheck(c.checks(p), GateAcceptance) && !hasRequiredRequirement(p) {
 			bad = append(bad, "没有配置必过的验收检查或验收要求。空配置不能通过验收与交付")
 		}
 		bad = append(bad, c.requiredFresh(p, GateAcceptance, fp)...)
@@ -331,7 +335,7 @@ func (c *Change) gate(root string, p Project, fp Fingerprint, libs []*LibraryPro
 		if c.liveAccept("release", BindIntegration, c.Merge.SHA) == nil {
 			return "", []string{"还没有对这个集成版本的发布声明。声明不是工具读回"}
 		}
-		if !hasReleaseReadback(p) {
+		if !hasReleaseReadback(c.checks(p)) {
 			return "", []string{"启用了发布阶段，但没有必过的 release_readback。普通检查和发布声明都不能代替机器读回"}
 		}
 		bad := c.requiredFresh(p, GateRelease, fp)
@@ -370,8 +374,8 @@ func isReleaseReadback(ch CheckSpec) bool {
 	return ch.Required && ch.Gate == GateRelease && ch.Layer == "release_readback"
 }
 
-func hasReleaseReadback(p Project) bool {
-	for _, ch := range p.Checks {
+func hasReleaseReadback(checks []CheckSpec) bool {
+	for _, ch := range checks {
 		if isReleaseReadback(ch) {
 			return true
 		}
@@ -380,10 +384,11 @@ func hasReleaseReadback(p Project) bool {
 }
 
 func (c *Change) releaseReadbackVerified(p Project, fp Fingerprint) bool {
-	if !hasReleaseReadback(p) {
+	checks := c.checks(p)
+	if !hasReleaseReadback(checks) {
 		return false
 	}
-	for _, ch := range p.Checks {
+	for _, ch := range checks {
 		if !isReleaseReadback(ch) {
 			continue
 		}
@@ -395,7 +400,7 @@ func (c *Change) releaseReadbackVerified(p Project, fp Fingerprint) bool {
 }
 
 func (c *Change) gateChecksMet(p Project, gate string, fp Fingerprint) bool {
-	if !hasRequiredCheck(p, gate) {
+	if !hasRequiredCheck(c.checks(p), gate) {
 		return false
 	}
 	return len(c.requiredFresh(p, gate, fp)) == 0
@@ -416,8 +421,8 @@ func (c *Change) independentRequirementsMet(root string, p Project, fp Fingerpri
 	return found
 }
 
-func hasRequiredCheck(p Project, gate string) bool {
-	for _, ch := range p.Checks {
+func hasRequiredCheck(checks []CheckSpec, gate string) bool {
+	for _, ch := range checks {
 		if ch.Gate == gate && ch.Required {
 			return true
 		}
