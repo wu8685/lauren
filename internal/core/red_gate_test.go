@@ -107,13 +107,33 @@ func TestRedGate(t *testing.T) {
 		}
 	})
 
-	t.Run("offByDefault", func(t *testing.T) {
+	t.Run("omittedDefaultsToRequired", func(t *testing.T) {
 		dir := t.TempDir()
 		writeRedProject(t, dir, "")
 		toBuild(t, dir)
 		must(t, dir, ExitOK, "check", "--name", "unit")
+		st := must(t, dir, ExitOK, "status")
+		red := st["red"].(map[string]any)
+		if red["required"] != true {
+			t.Fatalf("省略 red_gate 时应按 required 计算: %#v", red)
+		}
+		_, m, errb := runAt(t, dir, "change", "advance")
+		if !strings.Contains(errText(m, errb), "Red") {
+			t.Fatalf("省略字段的新旧项目不能凭一次通过离开实现: %s", errText(m, errb))
+		}
+	})
+
+	t.Run("explicitOffAllowsBarePass", func(t *testing.T) {
+		dir := t.TempDir()
+		writeRedProject(t, dir, "off")
+		toBuild(t, dir)
+		must(t, dir, ExitOK, "check", "--name", "unit")
+		st := must(t, dir, ExitOK, "status")
+		if st["red"].(map[string]any)["required"] != false {
+			t.Fatalf("显式 off 应关闭 Red: %#v", st["red"])
+		}
 		if must(t, dir, ExitOK, "change", "advance")["stage"] != StageAccept {
-			t.Fatal("未启用 Red 门禁时，现有流程应保持可用")
+			t.Fatal("写成 off 的项目应保持以前可以只靠通过离开实现的行为")
 		}
 	})
 }

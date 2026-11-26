@@ -139,7 +139,8 @@ func classificationFromLog(raw string) string {
 }
 
 func (p Project) redRequired() bool {
-	return p.Defaults.RedGate == "required"
+	// 省略字段和 required 都打开。只有显式 off 恢复以前可以只靠通过离开实现的行为。
+	return p.Defaults.RedGate != "off"
 }
 
 func redClassification(kind string) bool {
@@ -183,7 +184,7 @@ func (c *Change) redBlocked(p Project) string {
 	if c.redRecorded() {
 		return ""
 	}
-	return "启用了 Red 门禁，但没有先失败再通过的记录。失败结果要带脚本写的 lauren-class classification=assertion_fail 或 behavior_fail。可以 change red skip --reason 显式跳过"
+	return "离开实现与自验需要 Red：同一检查先失败再通过，失败输出要有脚本写的 lauren-class classification=assertion_fail 或 behavior_fail。可以 change red skip --reason 显式跳过，或把 defaults.red_gate 写成 off"
 }
 
 var statsLine = regexp.MustCompile(`^lauren-stats executed=(\d+) skipped=(\d+)\b`)
