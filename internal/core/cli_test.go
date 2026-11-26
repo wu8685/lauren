@@ -1279,3 +1279,118 @@ func TestReleaseReadbackRequired(t *testing.T) {
 		}
 	})
 }
+
+func humanStatus(t *testing.T, dir string) string {
+	t.Helper()
+	var out, errb bytes.Buffer
+	if code := Run([]string{"--root", dir, "status"}, &out, &errb); code != ExitOK {
+		t.Fatalf("status 失败: %s", errb.String())
+	}
+	return out.String()
+}
+
+func TestProductVerifiedWording(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{
+	  "schema": 1,
+	  "environments": ["development", "integration", "staging", "production"],
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main"},
+	  "checks": [
+	    {"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/unit.sh"], "required": true},
+	    {"name": "interact", "layer": "interaction", "gate": "acceptance", "argv": ["./checks/interact.sh"], "required": true, "environments": ["integration"]}
+	  ],
+	  "requirements": [{"id": "paths", "claim": "路径", "min_layer": "unit", "required": true, "check": "unit"}]
+	}`)
+	writeFile(t, filepath.Join(dir, "checks", "unit.sh"), "#!/bin/sh\nexit 0\n")
+	writeFile(t, filepath.Join(dir, "checks", "interact.sh"), "#!/bin/sh\nexit 0\n")
+	writeFile(t, filepath.Join(dir, "artifacts", "demand.json"), `{"goal":"g","acceptance":["a"],"baseline":"b"}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "plan.json"), `{"approach":"a","risks":"r","prechecks":["p"]}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "impl.json"), `{"summary":"s"}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "accept.json"), `{"summary":"a"}`)
+	gitInit(t, dir)
+	must(t, dir, ExitOK, "change", "create", "--goal", "语义")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
+	must(t, dir, ExitOK, "check", "--name", "unit")
+	facts := must(t, dir, ExitOK, "status")["facts"].(map[string]any)
+	if _, ok := facts["requirements_met"]; !ok || facts["source_verified"] != false || facts["independent_acceptance"] != false {
+		t.Fatalf("只有自验时不能声称独立验收: %#v", facts)
+	}
+	if facts["product_verified"] != facts["requirements_met"] {
+		t.Fatal("product_verified 应保持为 requirements_met 的兼容字段")
+	}
+	text := humanStatus(t, dir)
+	if !strings.Contains(text, "不是独立验收") || strings.Contains(text, "独立验收已完成") {
+		t.Fatalf("人读文案不应把自验说成独立验收:\n%s", text)
+	}
+
+	none := t.TempDir()
+	writeFile(t, filepath.Join(none, "lauren.project.json"), `{
+	  "schema": 1,
+	  "environments": ["development", "integration", "staging", "production"],
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main"},
+	  "checks": [{"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/unit.sh"], "required": true}],
+	  "requirements": []
+	}`)
+	writeFile(t, filepath.Join(none, "checks", "unit.sh"), "#!/bin/sh\nexit 0\n")
+	writeFile(t, filepath.Join(none, "artifacts", "demand.json"), `{"goal":"g","acceptance":["a"],"baseline":"b"}`)
+	writeFile(t, filepath.Join(none, "artifacts", "plan.json"), `{"approach":"a","risks":"r","prechecks":["p"]}`)
+	writeFile(t, filepath.Join(none, "artifacts", "impl.json"), `{"summary":"s"}`)
+	gitInit(t, none)
+	must(t, none, ExitOK, "change", "create", "--goal", "无要求")
+	must(t, none, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
+	must(t, none, ExitOK, "change", "advance")
+	must(t, none, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
+	must(t, none, ExitOK, "change", "advance")
+	must(t, none, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
+	must(t, none, ExitOK, "check", "--name", "unit")
+	nf := must(t, none, ExitOK, "status")["facts"].(map[string]any)
+	if nf["product_verified"] != false || nf["requirements_met"] != false || nf["independent_acceptance"] != false {
+		t.Fatalf("没有 requirement 时不应显示产品要求已满足: %#v", nf)
+	}
+
+	ind := t.TempDir()
+	writeFile(t, filepath.Join(ind, "lauren.project.json"), `{
+	  "schema": 1,
+	  "environments": ["development", "integration", "staging", "production"],
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main"},
+	  "checks": [
+	    {"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/unit.sh"], "required": true},
+	    {"name": "interact", "layer": "interaction", "gate": "acceptance", "argv": ["./checks/interact.sh"], "required": true, "environments": ["integration"]}
+	  ],
+	  "requirements": [{"id": "click", "claim": "保存", "min_layer": "interaction", "required": true, "check": "interact", "independent": true}]
+	}`)
+	writeFile(t, filepath.Join(ind, "checks", "unit.sh"), "#!/bin/sh\nexit 0\n")
+	writeFile(t, filepath.Join(ind, "checks", "interact.sh"), "#!/bin/sh\nexit 0\n")
+	writeFile(t, filepath.Join(ind, "artifacts", "demand.json"), `{"goal":"g","acceptance":["a"],"baseline":"b"}`)
+	writeFile(t, filepath.Join(ind, "artifacts", "plan.json"), `{"approach":"a","risks":"r","prechecks":["p"]}`)
+	writeFile(t, filepath.Join(ind, "artifacts", "impl.json"), `{"summary":"s"}`)
+	writeFile(t, filepath.Join(ind, "artifacts", "accept.json"), `{"summary":"a"}`)
+	gitInit(t, ind)
+	must(t, ind, ExitOK, "change", "create", "--goal", "独立声明")
+	must(t, ind, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
+	must(t, ind, ExitOK, "change", "advance")
+	must(t, ind, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
+	must(t, ind, ExitOK, "change", "advance")
+	must(t, ind, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
+	must(t, ind, ExitOK, "check", "--name", "unit")
+	must(t, ind, ExitOK, "change", "advance")
+	must(t, ind, ExitOK, "change", "submit", "--artifact", "artifacts/accept.json")
+	must(t, ind, ExitOK, "check", "--name", "interact", "--environment", "integration")
+	must(t, ind, ExitOK, "change", "accept", "--what", "delivery", "--source", "external", "--reason", "外部会话声明", "--scope", "fixture")
+	idf := must(t, ind, ExitOK, "status")["facts"].(map[string]any)
+	if idf["independent_acceptance"] != true || idf["source_verified"] != false || idf["acceptance_source"] != "external" || idf["release_declared"] != false || idf["release_verified"] != false {
+		t.Fatalf("外部来源只是未验证声明: %#v", idf)
+	}
+	if !strings.Contains(humanStatus(t, ind), "身份未验证") {
+		t.Fatal("人读输出应标明来源身份未验证")
+	}
+	writeFile(t, filepath.Join(ind, "app.txt"), "changed\n")
+	stale := must(t, ind, ExitOK, "status")["facts"].(map[string]any)
+	if stale["requirements_met"] != false || stale["product_verified"] != false || stale["independent_acceptance"] != false || stale["delivery_accepted"] != false {
+		t.Fatalf("候选变化后相关事实应失效: %#v", stale)
+	}
+}

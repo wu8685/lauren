@@ -388,6 +388,28 @@ func (c *Change) releaseReadbackVerified(p Project, fp Fingerprint) bool {
 	return true
 }
 
+func (c *Change) gateChecksMet(p Project, gate string, fp Fingerprint) bool {
+	if !hasRequiredCheck(p, gate) {
+		return false
+	}
+	return len(c.requiredFresh(p, gate, fp)) == 0
+}
+
+func (c *Change) independentRequirementsMet(p Project, fp Fingerprint) bool {
+	found := false
+	for _, req := range p.Requirements {
+		if !req.Required || !req.Independent {
+			continue
+		}
+		found = true
+		ok, _ := c.requirementMet(req, p, fp)
+		if !ok {
+			return false
+		}
+	}
+	return found
+}
+
 func hasRequiredCheck(p Project, gate string) bool {
 	for _, ch := range p.Checks {
 		if ch.Gate == gate && ch.Required {

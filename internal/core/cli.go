@@ -1169,7 +1169,14 @@ type facts struct {
 	DeliveryAccepted bool `json:"delivery_accepted"`
 	ReleaseDeclared  bool `json:"release_declared"`
 	ReleaseVerified  bool `json:"release_verified"`
-	ProductVerified  bool `json:"product_verified"`
+	// ProductVerified 与 RequirementsMet 相同，保留给已有调用方。它只表示已配置的 requirement 都有仍有效的通过，不是独立验收。
+	ProductVerified       bool   `json:"product_verified"`
+	RequirementsMet       bool   `json:"requirements_met"`
+	SelfChecksMet         bool   `json:"self_checks_met"`
+	AcceptanceChecksMet   bool   `json:"acceptance_checks_met"`
+	IndependentAcceptance bool   `json:"independent_acceptance"`
+	SourceVerified        bool   `json:"source_verified"`
+	AcceptanceSource      string `json:"acceptance_source,omitempty"`
 }
 
 type statusPayload struct {
@@ -1250,12 +1257,24 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 		}
 	}
 	p.ToolVersion = tool
+	source := ""
+	if fp.Kind == "ok" {
+		if acc := ch.liveAccept("delivery", BindWorktree, fp.Hash); acc != nil {
+			source = acc.Source
+		}
+	}
 	p.Facts = &facts{
-		ResultsRecorded:  len(ch.Runs) > 0,
-		DeliveryAccepted: fp.Kind == "ok" && ch.liveAccept("delivery", BindWorktree, fp.Hash) != nil,
-		ReleaseDeclared:  ch.mergedNow() && ch.liveAccept("release", BindIntegration, ch.Merge.SHA) != nil,
-		ReleaseVerified:  releaseVerified,
-		ProductVerified:  product,
+		ResultsRecorded:       len(ch.Runs) > 0,
+		DeliveryAccepted:      source != "",
+		ReleaseDeclared:       ch.mergedNow() && ch.liveAccept("release", BindIntegration, ch.Merge.SHA) != nil,
+		ReleaseVerified:       releaseVerified,
+		ProductVerified:       product,
+		RequirementsMet:       product,
+		SelfChecksMet:         ch.gateChecksMet(proj, GateSelf, fp),
+		AcceptanceChecksMet:   ch.gateChecksMet(proj, GateAcceptance, fp),
+		IndependentAcceptance: ch.independentRequirementsMet(proj, fp),
+		SourceVerified:        false,
+		AcceptanceSource:      source,
 	}
 	for _, pb := range libsFor(root, ch) {
 		p.Problems = append(p.Problems, problemView{
@@ -1292,8 +1311,10 @@ func writeHuman(w io.Writer, p statusPayload) {
 		fmt.Fprintln(w, "共享环境占用: 是")
 	}
 	if p.Facts != nil {
-		fmt.Fprintf(w, "结果已记录: %t\n交付已接受: %t\n发布已声明: %t\n发布已由工具读回: %t\n产品要求已满足: %t\n",
-			p.Facts.ResultsRecorded, p.Facts.DeliveryAccepted, p.Facts.ReleaseDeclared, p.Facts.ReleaseVerified, p.Facts.ProductVerified)
+		fmt.Fprintf(w, "结果已记录: %t\n交付已接受: %t\n交付来源声明: %s\n来源身份已验证: %t（身份未验证）\n发布已声明: %t（不是机器读回）\n发布已由工具读回: %t\n已配置要求有通过记录: %t（不是独立验收）\n必过自验已通过: %t\n必过验收检查已通过: %t\n独立要求有通过记录: %t\n",
+			p.Facts.ResultsRecorded, p.Facts.DeliveryAccepted, p.Facts.AcceptanceSource, p.Facts.SourceVerified,
+			p.Facts.ReleaseDeclared, p.Facts.ReleaseVerified, p.Facts.RequirementsMet,
+			p.Facts.SelfChecksMet, p.Facts.AcceptanceChecksMet, p.Facts.IndependentAcceptance)
 	}
 	if p.DeclaredVersion != nil {
 		fmt.Fprintf(w, "声明版本: %s（来源 %s，不是机器读回）\n", p.DeclaredVersion.Value, p.DeclaredVersion.Source)
