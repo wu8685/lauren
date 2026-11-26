@@ -174,7 +174,7 @@ func ensureGitignore(root string) error {
 
 func (a *app) cmdChange(args []string) int {
 	if len(args) == 0 {
-		return a.fail(ExitUsage, "用法：lauren change create|submit|advance|rollback|block|resume|cancel|accept|declare-version|policy|integration|release|problem")
+		return a.fail(ExitUsage, "用法：lauren change create|submit|advance|rollback|block|resume|cancel|accept|declare-version|policy|integration|release|problem|report")
 	}
 	switch args[0] {
 	case "create":
@@ -203,11 +203,79 @@ func (a *app) cmdChange(args []string) int {
 		return a.changeRelease(args[1:])
 	case "problem":
 		return a.changeProblem(args[1:])
+	case "report":
+		return a.changeReport(args[1:])
 	case "stage", "pass":
 		return a.fail(ExitUsage, "没有直接设置阶段或填写 pass 的命令")
 	default:
 		return a.fail(ExitUsage, "未知 change 子命令 "+args[0])
 	}
+}
+
+func (a *app) changeReport(args []string) int {
+	if len(args) == 0 || args[0] != "submit" {
+		return a.fail(ExitUsage, "用法：lauren change report submit --requirement <id> --file <路径> --source self|declared|external")
+	}
+	fs := flag.NewFlagSet("report submit", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	id := fs.String("id", "", "")
+	requirement := fs.String("requirement", "", "")
+	file := fs.String("file", "", "")
+	source := fs.String("source", "", "self、declared 或 external")
+	envFlag := fs.String("environment", "", "")
+	if err := fs.Parse(args[1:]); err != nil {
+		return ExitUsage
+	}
+	if strings.TrimSpace(*requirement) == "" || strings.TrimSpace(*file) == "" || !validSourceKind(*source) {
+		return a.fail(ExitUsage, "需要 --requirement、--file，以及 --source self|declared|external。来源只是声明")
+	}
+	root, err := a.projectRoot()
+	if err != nil {
+		return a.fail(ExitUsage, err.Error())
+	}
+	return a.withChange(*id, func(ch *Change, proj Project, fp Fingerprint) (int, any) {
+		if ch.Status != StatusActive {
+			return a.fail(ExitGate, "只有进行中的变更可以提交 QA 报告"), nil
+		}
+		var req *Requirement
+		for i := range proj.Requirements {
+			if proj.Requirements[i].ID == *requirement {
+				req = &proj.Requirements[i]
+				break
+			}
+		}
+		if req == nil {
+			return a.fail(ExitUsage, "没有要求 "+*requirement), nil
+		}
+		spec := findCheck(proj, req.Check)
+		if spec == nil {
+			return a.fail(ExitUsage, "要求指向不存在的检查"), nil
+		}
+		rel, err := reportPathOK(proj, *file)
+		if err != nil {
+			return a.fail(ExitUsage, err.Error()), nil
+		}
+		env := *envFlag
+		if env == "" {
+			env = ch.Policy.Environment
+		}
+		if !envAccepted(*spec, proj, env) {
+			return a.fail(ExitUsage, "环境 "+env+" 不被该检查接受"), nil
+		}
+		if fp.Kind != "ok" {
+			return a.fail(ExitGate, fp.Note), nil
+		}
+		sum, err := fileDigest(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			return a.fail(ExitUsage, "无法读取 QA 报告"), nil
+		}
+		ch.Reports = append(ch.Reports, QAReport{
+			ID: newID("q-"), Requirement: req.ID, Path: rel, Digest: sum, Environment: env,
+			Fingerprint: fp.Hash, SourceKind: *source, SourceVerified: false, At: time.Now().UTC(),
+		})
+		ch.History = append(ch.History, Event{At: time.Now().UTC(), Kind: "report", Message: req.ID + " " + rel + " " + *source})
+		return ExitOK, a.payload(root, "change report submit", ch, proj, fp)
+	})
 }
 
 func (a *app) withChange(id string, fn func(*Change, Project, Fingerprint) (int, any)) int {
@@ -371,7 +439,7 @@ func (a *app) changeAdvance(args []string) int {
 		if lerr != nil {
 			return a.fail(ExitInternal, lerr.Error()), nil
 		}
-		next, bad := ch.gate(proj, fp, libs)
+		next, bad := ch.gate(root, proj, fp, libs)
 		if len(bad) > 0 {
 			return a.fail(ExitGate, strings.Join(bad, "；")), nil
 		}
@@ -1152,6 +1220,18 @@ type checkView struct {
 	TimeoutSeconds  int64  `json:"timeout_seconds,omitempty"`
 }
 
+type reportView struct {
+	Requirement    string `json:"requirement"`
+	Path           string `json:"path"`
+	Digest         string `json:"digest"`
+	Environment    string `json:"environment"`
+	Fingerprint    string `json:"fingerprint"`
+	SourceKind     string `json:"source_kind"`
+	SourceVerified bool   `json:"source_verified"`
+	Fresh          bool   `json:"fresh"`
+	Note           string `json:"note,omitempty"`
+}
+
 type problemView struct {
 	ID            string `json:"id"`
 	Summary       string `json:"summary"`
@@ -1196,6 +1276,7 @@ type statusPayload struct {
 	Facts           *facts        `json:"facts,omitempty"`
 	Checks          []checkView   `json:"checks,omitempty"`
 	Problems        []problemView `json:"problems,omitempty"`
+	Reports         []reportView  `json:"reports,omitempty"`
 	Next            []string      `json:"next,omitempty"`
 	History         []Event       `json:"history,omitempty"`
 	Trust           string        `json:"trust,omitempty"`
@@ -1205,7 +1286,7 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 	p := statusPayload{
 		OK: true, Command: cmd, ID: ch.ID, Goal: ch.Goal, Stage: ch.Stage, Status: ch.Status,
 		Policy: &ch.Policy, Candidate: fp, Merge: ch.Merge, DeclaredVersion: ch.DeclaredVersion,
-		Next:  nextActions(ch, proj, fp, libsFor(root, ch)),
+		Next:  nextActions(root, ch, proj, fp, libsFor(root, ch)),
 		Trust: "本地状态文件可以被改写。这个 CLI 不认证人类，也不能防止恶意篡改。合并是否可信看仓库 CI 重跑；交付是否接受看来源被明确记下的接受记录。不会自动 merge、push、部署或通知。",
 	}
 	if ch.Block != nil && ch.Status == StatusBlocked {
@@ -1233,7 +1314,7 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 		if !req.Required {
 			continue
 		}
-		ok, _ := ch.requirementMet(req, proj, fp)
+		ok, _ := ch.requirementMet(root, req, proj, fp)
 		if !ok {
 			product = false
 		}
@@ -1272,9 +1353,17 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 		RequirementsMet:       product,
 		SelfChecksMet:         ch.gateChecksMet(proj, GateSelf, fp),
 		AcceptanceChecksMet:   ch.gateChecksMet(proj, GateAcceptance, fp),
-		IndependentAcceptance: ch.independentRequirementsMet(proj, fp),
+		IndependentAcceptance: ch.independentRequirementsMet(root, proj, fp),
 		SourceVerified:        false,
 		AcceptanceSource:      source,
+	}
+	for _, rep := range ch.Reports {
+		fresh, note := ch.describeReport(root, proj, rep, fp)
+		p.Reports = append(p.Reports, reportView{
+			Requirement: rep.Requirement, Path: rep.Path, Digest: rep.Digest, Environment: rep.Environment,
+			Fingerprint: rep.Fingerprint, SourceKind: rep.SourceKind, SourceVerified: false,
+			Fresh: fresh, Note: note,
+		})
 	}
 	for _, pb := range libsFor(root, ch) {
 		p.Problems = append(p.Problems, problemView{
@@ -1333,6 +1422,12 @@ func writeHuman(w io.Writer, p statusPayload) {
 			if c.Note != "" {
 				fmt.Fprintf(w, "    %s\n", c.Note)
 			}
+		}
+	}
+	if len(p.Reports) > 0 {
+		fmt.Fprintln(w, "QA 报告:")
+		for _, rep := range p.Reports {
+			fmt.Fprintf(w, "  %s %s 来源声明=%s 已验证=%t 摘要仍匹配=%t\n", rep.Requirement, rep.Path, rep.SourceKind, rep.SourceVerified, rep.Fresh)
 		}
 	}
 	if len(p.Problems) > 0 {

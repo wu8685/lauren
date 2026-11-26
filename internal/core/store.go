@@ -336,6 +336,9 @@ func (p Project) validate() error {
 	if err := validateTimeoutSeconds("defaults.check_timeout_seconds", d.CheckTimeoutSeconds); err != nil {
 		return err
 	}
+	if err := validateReportsDir(d.ReportsDir); err != nil {
+		return err
+	}
 	for _, ch := range p.Checks {
 		switch ch.Gate {
 		case GateSelf, GateAcceptance, GateRelease:

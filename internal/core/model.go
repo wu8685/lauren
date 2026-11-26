@@ -70,6 +70,7 @@ type Defaults struct {
 	IntegrationBranch   string `json:"integration_branch"`
 	PromoteThreshold    int    `json:"promote_threshold,omitempty"`
 	CheckTimeoutSeconds int64  `json:"check_timeout_seconds,omitempty"`
+	ReportsDir          string `json:"reports_dir,omitempty"`
 }
 
 type CheckSpec struct {
@@ -83,12 +84,13 @@ type CheckSpec struct {
 }
 
 type Requirement struct {
-	ID          string `json:"id"`
-	Claim       string `json:"claim"`
-	MinLayer    string `json:"min_layer"`
-	Required    bool   `json:"required"`
-	Check       string `json:"check"`
-	Independent bool   `json:"independent"`
+	ID             string `json:"id"`
+	Claim          string `json:"claim"`
+	MinLayer       string `json:"min_layer"`
+	Required       bool   `json:"required"`
+	Check          string `json:"check"`
+	Independent    bool   `json:"independent"`
+	RequiresReport bool   `json:"requires_report,omitempty"`
 }
 
 type Policy struct {
@@ -109,6 +111,7 @@ type Change struct {
 	EvidenceGeneration int          `json:"evidence_generation"`
 	Artifacts          []Artifact   `json:"artifacts"`
 	Runs               []CheckRun   `json:"runs"`
+	Reports            []QAReport   `json:"reports,omitempty"`
 	Problems           []Problem    `json:"problems"`
 	Accepts            []Accept     `json:"accepts"`
 	DeclaredVersion    *VersionFact `json:"declared_version,omitempty"`
@@ -154,6 +157,18 @@ type CheckRun struct {
 	CandidateKind      string    `json:"candidate_kind"`
 	Note               string    `json:"note,omitempty"`
 	TimeoutSeconds     int64     `json:"timeout_seconds,omitempty"`
+}
+
+type QAReport struct {
+	ID             string    `json:"id"`
+	Requirement    string    `json:"requirement"`
+	Path           string    `json:"path"`
+	Digest         string    `json:"digest"`
+	Environment    string    `json:"environment"`
+	Fingerprint    string    `json:"fingerprint"`
+	SourceKind     string    `json:"source_kind"`
+	SourceVerified bool      `json:"source_verified"`
+	At             time.Time `json:"at"`
 }
 
 type Problem struct {
