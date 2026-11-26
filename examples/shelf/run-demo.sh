@@ -13,6 +13,22 @@ cd "$TMP"
 git init -q -b main
 git add .
 git -c user.email=dev@example.com -c user.name=dev commit -qm init
+# 示例不写 red_gate，缺省是 required。runtime 标记不进候选指纹，用来重放一次分类失败，再跑真正的通过。
+replay_red() {
+  mkdir -p .lauren/runtime
+  : > .lauren/runtime/red-replay
+  set +e
+  "$BIN" check --name unit
+  code=$?
+  set -e
+  if [ "$code" -ne 4 ]; then
+    echo "shelf demo: 预期 unit 先以 behavior_fail 失败，退出码是 $code" >&2
+    exit 1
+  fi
+  rm -f .lauren/runtime/red-replay
+  "$BIN" check --name unit
+}
+
 "$BIN" change create --goal "空选择时走明确失败路径"
 "$BIN" change submit --artifact artifacts/demand.json
 "$BIN" change advance
@@ -20,8 +36,9 @@ git -c user.email=dev@example.com -c user.name=dev commit -qm init
 "$BIN" change advance
 "$BIN" change submit --artifact artifacts/impl.json
 "$BIN" check --name static
-"$BIN" check --name unit
+replay_red
 "$BIN" change advance
+"$BIN" --json status | python3 -c 'import json,sys; red=json.load(sys.stdin)["red"]; assert red["required"] and red["recorded"] and not red["skipped"], red'
 "$BIN" change submit --artifact artifacts/accept.json
 "$BIN" check --name interact --environment integration
 "$BIN" change accept --what delivery --source human --reason "对照关闭、空选择和失败路径看过" --scope "shelf 示例"
@@ -52,7 +69,7 @@ PY
 "$BIN" change advance
 "$BIN" change submit --artifact artifacts/impl.json
 "$BIN" check --name static
-"$BIN" check --name unit
+replay_red
 "$BIN" change advance
 "$BIN" change submit --artifact artifacts/accept.json
 "$BIN" check --name interact --environment integration

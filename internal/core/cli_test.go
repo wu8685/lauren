@@ -72,6 +72,8 @@ func writeFile(t *testing.T, path, body string) {
 	}
 }
 
+// projectJSON 里的流程夹具测的不是 Red。缺省已经是 required，所以这里显式写成 off。
+// 理由：这些夹具只隔离其他门禁，不重放一次带分类的失败。默认行为由 TestRedGate 覆盖。
 func projectJSON(release string) string {
 	return `{
   "schema": 1,
@@ -80,7 +82,8 @@ func projectJSON(release string) string {
     "environment": "development",
     "release_stage": "` + release + `",
     "artifact_level": "standard",
-    "integration_branch": "main"
+    "integration_branch": "main",
+    "red_gate": "off"
   },
   "checks": [
     {"name": "static", "layer": "static", "gate": "self_verification", "argv": ["./checks/static.sh"], "required": true, "environments": ["development", "integration"]},
@@ -729,6 +732,9 @@ func TestCheckTimeout(t *testing.T) {
 		if proj.Defaults.CheckTimeoutSeconds != 600 || proj.projectTimeoutSeconds() != 600 {
 			t.Fatalf("init 应写入 600 秒: %+v", proj.Defaults)
 		}
+		if proj.Defaults.RedGate != "required" || !proj.redRequired() {
+			t.Fatalf("init 应把 Red 写成 required: %+v", proj.Defaults)
+		}
 		raw, err := os.ReadFile(filepath.Join(dir, "lauren.project.json"))
 		if err != nil || !strings.Contains(string(raw), `"check_timeout_seconds": 600`) {
 			t.Fatalf("init 文件没有写出超时: %s", raw)
@@ -903,12 +909,14 @@ func reachBuild(t *testing.T, dir, goal string) {
 	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
 }
 
+// 最新结果夹具里的失败故意不写 lauren-class。Red 缺省会把这种先败后过留在实现阶段，
+// 所以这里显式 off，只测同一环境的最新结果。
 func oneSelfProject(t *testing.T, dir string) {
 	t.Helper()
 	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{
 	  "schema": 1,
 	  "environments": ["development", "integration", "staging", "production"],
-	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main", "check_timeout_seconds": 1},
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main", "check_timeout_seconds": 1, "red_gate": "off"},
 	  "checks": [
 	    {"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/unit.sh"], "required": true, "environments": ["development", "integration"]},
 	    {"name": "static", "layer": "static", "gate": "self_verification", "argv": ["./checks/static.sh"], "required": false, "environments": ["development"]}
@@ -1121,12 +1129,13 @@ func TestLatestResultGates(t *testing.T) {
 	})
 }
 
+// 发布读回夹具显式关闭 Red。理由：这里要单独看读回门禁，不把缺省的 Red 要求和读回失败混在同一次推进里。
 func releaseReadyProject(t *testing.T, dir, checks string) {
 	t.Helper()
 	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{
 	  "schema": 1,
 	  "environments": ["development", "integration", "staging", "production"],
-	  "defaults": {"environment": "development", "release_stage": "included", "artifact_level": "standard", "integration_branch": "main"},
+	  "defaults": {"environment": "development", "release_stage": "included", "artifact_level": "standard", "integration_branch": "main", "red_gate": "off"},
 	  "checks": `+checks+`,
 	  "requirements": [{"id": "click", "claim": "保存", "min_layer": "interaction", "required": true, "check": "interact", "independent": true}]
 	}`)
@@ -1354,10 +1363,11 @@ func TestProductVerifiedWording(t *testing.T) {
 	}
 
 	ind := t.TempDir()
+	// 这条夹具要离开实现阶段去看独立验收声明。显式关掉 Red，理由是不在这里重放分类失败。
 	writeFile(t, filepath.Join(ind, "lauren.project.json"), `{
 	  "schema": 1,
 	  "environments": ["development", "integration", "staging", "production"],
-	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main"},
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main", "red_gate": "off"},
 	  "checks": [
 	    {"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/unit.sh"], "required": true},
 	    {"name": "interact", "layer": "interaction", "gate": "acceptance", "argv": ["./checks/interact.sh"], "required": true, "environments": ["integration"]}

@@ -129,7 +129,7 @@ func (a *app) cmdInit(args []string) int {
 		Environments: []string{"development", "integration", "staging", "production"},
 		Defaults: Defaults{
 			Environment: *env, ReleaseStage: *release, ArtifactLevel: *level, IntegrationBranch: *branch,
-			PromoteThreshold: 2, CheckTimeoutSeconds: defaultCheckTimeoutSeconds,
+			PromoteThreshold: 2, CheckTimeoutSeconds: defaultCheckTimeoutSeconds, RedGate: "required",
 		},
 		Checks: []CheckSpec{}, Requirements: []Requirement{},
 	}
@@ -150,7 +150,7 @@ func (a *app) cmdInit(args []string) int {
 	if a.json {
 		return a.emit(ExitOK, map[string]any{"ok": true, "command": "init", "config": path, "runtime": runtimeDir(root)})
 	}
-	fmt.Fprintf(a.out, "已写入 %s\n单项检查默认超时 %d 秒。\n运行状态在 %s，按变更分目录，不进 git。\n", path, p.Defaults.CheckTimeoutSeconds, runtimeDir(root))
+	fmt.Fprintf(a.out, "已写入 %s\n单项检查默认超时 %d 秒。Red 门禁缺省为 required；不需要时把 defaults.red_gate 写成 off。\n运行状态在 %s，按变更分目录，不进 git。\n", path, p.Defaults.CheckTimeoutSeconds, runtimeDir(root))
 	return ExitOK
 }
 

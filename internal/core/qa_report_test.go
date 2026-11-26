@@ -8,11 +8,12 @@ import (
 )
 
 func TestQAReportDigestGates(t *testing.T) {
+	// 报告夹具显式关闭 Red。理由：这里只测摘要和文件，不重放分类失败。
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{
 	  "schema": 1,
 	  "environments": ["development", "integration", "staging", "production"],
-	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main", "reports_dir": ".lauren/reports"},
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main", "reports_dir": ".lauren/reports", "red_gate": "off"},
 	  "checks": [
 	    {"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/unit.sh"], "required": true},
 	    {"name": "interact", "layer": "interaction", "gate": "acceptance", "argv": ["./checks/interact.sh"], "required": true, "environments": ["integration"]}
@@ -58,7 +59,7 @@ func TestQAReportDigestGates(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{
 	  "schema": 1,
 	  "environments": ["development", "integration", "staging", "production"],
-	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main"},
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main", "red_gate": "off"},
 	  "checks": [
 	    {"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/unit.sh"], "required": true},
 	    {"name": "interact", "layer": "interaction", "gate": "acceptance", "argv": ["./checks/interact.sh"], "required": true, "environments": ["integration"]}
