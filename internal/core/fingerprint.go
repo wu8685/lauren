@@ -1,15 +1,21 @@
 package core
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 )
+
+// fingerprintVersion 写进哈希原文。算法从按行切 git status 换成 NUL 记录后，旧指纹不再等于新指纹。
+const fingerprintVersion = "v2"
 
 func fingerprint(root string, proj Project) Fingerprint {
 	top, err := gitOut(root, "rev-parse", "--show-toplevel")
@@ -28,46 +34,43 @@ func fingerprint(root string, proj Project) Fingerprint {
 	}
 	head = strings.TrimSpace(head)
 	var files []string
-	if tree, err := gitOut(root, "ls-tree", "-r", "HEAD"); err == nil {
-		for _, line := range strings.Split(tree, "\n") {
-			tab := strings.Index(line, "\t")
-			if tab < 0 {
-				continue
-			}
-			path := filepath.ToSlash(line[tab+1:])
-			if skipPath(path) || path == "lauren.project.json" {
-				continue
-			}
-			files = append(files, "blob "+line)
-		}
+	tree, err := gitBytes(root, "ls-tree", "-r", "-z", "HEAD")
+	if err != nil && !strings.Contains(err.Error(), "exit status") {
+		return Fingerprint{Kind: "unknown", Note: "无法读取 git 树：" + err.Error()}
 	}
-	status, err := gitOut(root, "status", "--porcelain=v1", "-uall")
+	treeFiles, err := parseTreeZ(tree)
+	if err != nil {
+		return Fingerprint{Kind: "unknown", Note: err.Error()}
+	}
+	files = append(files, treeFiles...)
+	status, err := gitBytes(root, "status", "--porcelain=v1", "-z", "-uall")
 	if err != nil {
 		return Fingerprint{Kind: "unknown", Note: "无法读取 git 状态：" + err.Error()}
 	}
+	entries, err := parsePorcelainZ(status)
+	if err != nil {
+		return Fingerprint{Kind: "unknown", Note: err.Error()}
+	}
 	dirty := false
-	for _, line := range strings.Split(status, "\n") {
-		if len(line) < 4 {
-			continue
-		}
-		path := line[3:]
-		if i := strings.Index(path, " -> "); i >= 0 {
-			path = path[i+4:]
-		}
-		path = filepath.ToSlash(strings.TrimSpace(path))
+	for _, ent := range entries {
+		path := filepath.ToSlash(ent.path)
 		if skipPath(path) || path == "lauren.project.json" {
 			continue
 		}
 		dirty = true
-		sum, ferr := hashFile(filepath.Join(root, filepath.FromSlash(path)))
+		token, ferr := hashCandidate(root, path)
 		if ferr != nil {
-			files = append(files, path+" deleted")
-			continue
+			if errors.Is(ferr, os.ErrNotExist) {
+				files = append(files, path+" deleted")
+				continue
+			}
+			return Fingerprint{Kind: "unknown", Note: "无法读取候选文件 " + path + "：" + ferr.Error()}
 		}
-		files = append(files, path+" "+sum)
+		files = append(files, path+" "+token)
 	}
 	sort.Strings(files)
 	h := sha256.New()
+	h.Write([]byte("fingerprint " + fingerprintVersion + "\n"))
 	h.Write([]byte("catalog "))
 	h.Write(catalogBytes(proj))
 	h.Write([]byte("\n"))
@@ -102,22 +105,98 @@ func skipPath(path string) bool {
 	return p == ".lauren/runtime" || strings.HasPrefix(p, ".lauren/runtime/") || p == ".lauren/problems" || strings.HasPrefix(p, ".lauren/problems/") || p == ".lauren" || strings.HasPrefix(p, ".git/")
 }
 
-func hashFile(path string) (string, error) {
-	b, err := os.ReadFile(path)
+type porcelainEntry struct {
+	xy   string
+	path string
+	orig string
+}
+
+func parsePorcelainZ(data []byte) ([]porcelainEntry, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	parts := bytes.Split(data, []byte{0})
+	var out []porcelainEntry
+	for i := 0; i < len(parts); {
+		rec := parts[i]
+		if len(rec) == 0 {
+			i++
+			continue
+		}
+		if len(rec) < 4 || rec[2] != ' ' {
+			return nil, fmt.Errorf("无法解析 git status 的 NUL 记录")
+		}
+		xy := string(rec[:2])
+		path := string(rec[3:])
+		i++
+		orig := ""
+		if strings.ContainsAny(xy, "RC") {
+			if i >= len(parts) || len(parts[i]) == 0 {
+				return nil, fmt.Errorf("git status 的重命名或复制记录缺少路径")
+			}
+			orig = string(parts[i])
+			i++
+		}
+		out = append(out, porcelainEntry{xy: xy, path: path, orig: orig})
+	}
+	return out, nil
+}
+
+func parseTreeZ(data []byte) ([]string, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var files []string
+	for _, rec := range bytes.Split(data, []byte{0}) {
+		if len(rec) == 0 {
+			continue
+		}
+		tab := bytes.IndexByte(rec, '\t')
+		if tab < 0 {
+			return nil, fmt.Errorf("无法解析 git ls-tree 的 NUL 记录")
+		}
+		path := filepath.ToSlash(string(rec[tab+1:]))
+		if skipPath(path) || path == "lauren.project.json" {
+			continue
+		}
+		files = append(files, "blob "+string(rec))
+	}
+	return files, nil
+}
+
+func hashCandidate(root, rel string) (string, error) {
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	fi, err := os.Lstat(full)
+	if err != nil {
+		return "", err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(full)
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256([]byte("symlink\n" + target))
+		return "symlink " + hex.EncodeToString(sum[:]), nil
+	}
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("%s 不是普通文件", rel)
+	}
+	b, err := os.ReadFile(full)
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:]), nil
+	return "file " + hex.EncodeToString(sum[:]), nil
 }
 
 func gitOut(dir string, args ...string) (string, error) {
+	b, err := gitBytes(dir, args...)
+	return string(b), err
+}
+
+func gitBytes(dir string, args ...string) ([]byte, error) {
 	c := exec.Command("git", args...)
 	c.Dir = dir
 	c.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	b, err := c.Output()
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
+	return c.Output()
 }
