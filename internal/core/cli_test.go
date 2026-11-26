@@ -1119,3 +1119,163 @@ func TestLatestResultGates(t *testing.T) {
 		}
 	})
 }
+
+func releaseReadyProject(t *testing.T, dir, checks string) {
+	t.Helper()
+	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{
+	  "schema": 1,
+	  "environments": ["development", "integration", "staging", "production"],
+	  "defaults": {"environment": "development", "release_stage": "included", "artifact_level": "standard", "integration_branch": "main"},
+	  "checks": `+checks+`,
+	  "requirements": [{"id": "click", "claim": "保存", "min_layer": "interaction", "required": true, "check": "interact", "independent": true}]
+	}`)
+	writeFile(t, filepath.Join(dir, "checks", "unit.sh"), "#!/bin/sh\nexit 0\n")
+	writeFile(t, filepath.Join(dir, "checks", "interact.sh"), "#!/bin/sh\nexit 0\n")
+	writeFile(t, filepath.Join(dir, "checks", "read-version.sh"), "#!/bin/sh\nif [ -f .lauren/runtime/version.fail ]; then exit 1; fi\necho version=0.1.0\n")
+	writeFile(t, filepath.Join(dir, "checks", "other.sh"), "#!/bin/sh\necho other\n")
+	writeFile(t, filepath.Join(dir, "artifacts", "demand.json"), `{"goal":"g","acceptance":["a"],"baseline":"b"}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "plan.json"), `{"approach":"a","risks":"r","prechecks":["p"]}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "impl.json"), `{"summary":"s"}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "accept.json"), `{"summary":"a"}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "release.json"), `{"observation":"o"}`)
+	gitInit(t, dir)
+}
+
+func enterRelease(t *testing.T, dir string) {
+	t.Helper()
+	must(t, dir, ExitOK, "change", "create", "--goal", "发布")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
+	must(t, dir, ExitOK, "check", "--name", "unit")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/accept.json")
+	must(t, dir, ExitOK, "check", "--name", "interact", "--environment", "integration")
+	must(t, dir, ExitOK, "change", "accept", "--what", "delivery", "--source", "human", "--reason", "接受", "--scope", "fixture")
+	sha := gitSHA(t, dir)
+	must(t, dir, ExitOK, "change", "integration", "record", "--sha", sha, "--reason", "假定已合入")
+	if must(t, dir, ExitOK, "change", "advance")["stage"] != StageRelease {
+		t.Fatal("应进入发布与观察")
+	}
+	must(t, dir, ExitOK, "change", "accept", "--what", "release", "--source", "human", "--reason", "声明发布", "--scope", "fixture")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/release.json")
+}
+
+func TestReleaseReadbackRequired(t *testing.T) {
+	selfAndAccept := `[
+	  {"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/unit.sh"], "required": true},
+	  {"name": "interact", "layer": "interaction", "gate": "acceptance", "argv": ["./checks/interact.sh"], "required": true, "environments": ["integration", "staging"]}
+	]`
+	withReadback := `[
+	  {"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/unit.sh"], "required": true},
+	  {"name": "interact", "layer": "interaction", "gate": "acceptance", "argv": ["./checks/interact.sh"], "required": true, "environments": ["integration", "staging"]},
+	  {"name": "version", "layer": "release_readback", "gate": "release", "argv": ["./checks/read-version.sh"], "required": true, "environments": ["staging", "production"]},
+	  {"name": "other", "layer": "unit", "gate": "release", "argv": ["./checks/other.sh"], "required": true, "environments": ["staging", "production"]}
+	]`
+
+	t.Run("zeroChecksCannotAdvance", func(t *testing.T) {
+		dir := t.TempDir()
+		releaseReadyProject(t, dir, selfAndAccept)
+		enterRelease(t, dir)
+		st := must(t, dir, ExitOK, "status")
+		if st["facts"].(map[string]any)["release_verified"] != false {
+			t.Fatal("没有机器读回时 release_verified 必须是 false")
+		}
+		_, m, errb := runAt(t, dir, "change", "advance")
+		if !strings.Contains(errText(m, errb), "release_readback") {
+			t.Fatalf("零 release readback 不能进入复盘: %s", errText(m, errb))
+		}
+		if must(t, dir, ExitOK, "status")["stage"] == StageRetro {
+			t.Fatal("已经进入复盘")
+		}
+	})
+
+	t.Run("nonReadbackGateDoesNotCount", func(t *testing.T) {
+		dir := t.TempDir()
+		releaseReadyProject(t, dir, `[
+		  {"name": "unit", "layer": "unit", "gate": "self_verification", "argv": ["./checks/unit.sh"], "required": true},
+		  {"name": "interact", "layer": "interaction", "gate": "acceptance", "argv": ["./checks/interact.sh"], "required": true, "environments": ["integration", "staging"]},
+		  {"name": "other", "layer": "unit", "gate": "release", "argv": ["./checks/other.sh"], "required": true, "environments": ["staging", "production"]}
+		]`)
+		enterRelease(t, dir)
+		must(t, dir, ExitOK, "check", "--name", "other", "--environment", "staging")
+		if must(t, dir, ExitOK, "status")["facts"].(map[string]any)["release_verified"] != false {
+			t.Fatal("layer 不是 release_readback 的检查不能使 release_verified 为 true")
+		}
+		_, m, errb := runAt(t, dir, "change", "advance")
+		if !strings.Contains(errText(m, errb), "release_readback") {
+			t.Fatalf("非读回检查不能代替机器读回: %s", errText(m, errb))
+		}
+	})
+
+	t.Run("failWrongEnvWrongSHAAndSuccess", func(t *testing.T) {
+		dir := t.TempDir()
+		releaseReadyProject(t, dir, withReadback)
+		enterRelease(t, dir)
+		if must(t, dir, ExitOK, "status")["facts"].(map[string]any)["release_verified"] != false {
+			t.Fatal("只声明发布不能使 release_verified 为 true")
+		}
+		_, m, errb := runAt(t, dir, "change", "advance")
+		if errText(m, errb) == "" {
+			t.Fatal("未执行读回不能离开")
+		}
+		must(t, dir, ExitCheck, "check", "--name", "version", "--environment", "development")
+		if must(t, dir, ExitOK, "status")["facts"].(map[string]any)["release_verified"] != false {
+			t.Fatal("错误环境不能使 release_verified 为 true")
+		}
+		writeFile(t, filepath.Join(dir, ".lauren", "runtime", "version.fail"), "1\n")
+		must(t, dir, ExitCheck, "check", "--name", "version", "--environment", "staging")
+		os.Remove(filepath.Join(dir, ".lauren", "runtime", "version.fail"))
+		// 失败会回到实现。再走回发布，失败的读回仍然不能离开。
+		for must(t, dir, ExitOK, "status")["stage"] != StageRelease {
+			if _, m, errb = runAt(t, dir, "change", "advance"); errText(m, errb) != "" {
+				t.Fatalf("回到发布失败: %s", errText(m, errb))
+			}
+		}
+		_, m, errb = runAt(t, dir, "change", "advance")
+		if errText(m, errb) == "" || must(t, dir, ExitOK, "status")["stage"] == StageRetro {
+			t.Fatalf("失败的读回不能进入复盘: %s", errText(m, errb))
+		}
+		must(t, dir, ExitOK, "check", "--name", "version", "--environment", "staging")
+		must(t, dir, ExitOK, "check", "--name", "other", "--environment", "staging")
+		id := must(t, dir, ExitOK, "status")["id"].(string)
+		err := WithChange(dir, id, func(ch *Change) error {
+			for i := range ch.Runs {
+				if ch.Runs[i].Name == "version" && ch.Runs[i].Status == "pass" {
+					ch.Runs[i].IntegrationSHA = "0123456789abcdef0123456789abcdef01234567"
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if must(t, dir, ExitOK, "status")["facts"].(map[string]any)["release_verified"] != false {
+			t.Fatal("绑错集成版本时 release_verified 必须是 false")
+		}
+		_, m, errb = runAt(t, dir, "change", "advance")
+		if errText(m, errb) == "" {
+			t.Fatal("错误版本的读回不能离开发布")
+		}
+		err = WithChange(dir, id, func(ch *Change) error {
+			for i := range ch.Runs {
+				if ch.Runs[i].Name == "version" && ch.Runs[i].Status == "pass" {
+					ch.Runs[i].IntegrationSHA = ch.Merge.SHA
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := must(t, dir, ExitOK, "status")
+		if st["facts"].(map[string]any)["release_verified"] != true || !wantsAdvance(st) {
+			t.Fatalf("合法读回应允许推进: %#v", st["facts"])
+		}
+		if must(t, dir, ExitOK, "change", "advance")["stage"] != StageRetro {
+			t.Fatal("读回和声明都齐时应进入复盘")
+		}
+	})
+}
