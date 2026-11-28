@@ -153,6 +153,61 @@ func TestMidRunKeepsExitCode(t *testing.T) {
 	}
 }
 
+func TestCheckSyncsCatalogWithoutStatus(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{
+	  "schema": 1,
+	  "environments": ["development", "integration", "staging", "production"],
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main", "red_gate": "off"},
+	  "checks": [{"name": "t", "layer": "unit", "gate": "self_verification", "argv": ["true"], "required": true}],
+	  "requirements": []
+	}`)
+	writeFile(t, filepath.Join(dir, "README"), "x\n")
+	gitInit(t, dir)
+	must(t, dir, ExitOK, "change", "create", "--goal", "g")
+	must(t, dir, ExitOK, "check", "--name", "t")
+	raw, err := os.ReadFile(filepath.Join(dir, "lauren.project.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := strings.Replace(string(raw), `"requirements": []`, `"requirements": [{"id":"R1","text":"new req"}]`, 1)
+	if updated == string(raw) {
+		t.Fatal("没有改到 requirements")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "lauren.project.json"), []byte(updated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, m, errb := runAt(t, dir, "check", "--name", "t")
+	if strings.Contains(errText(m, errb), "证据目录变了") || code != ExitOK {
+		t.Fatalf("改 requirements 后直接 check 应自己同步 catalog: code=%d %s", code, errText(m, errb))
+	}
+	if code2, m2, errb2 := runAt(t, dir, "check", "--name", "t"); code2 != ExitOK || strings.Contains(errText(m2, errb2), "证据目录变了") {
+		t.Fatalf("第二次 check 仍应通过: code=%d %s", code2, errText(m2, errb2))
+	}
+}
+
+func TestPlanEvidenceDistinguishesFail(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{
+	  "schema": 1,
+	  "environments": ["development", "integration", "staging", "production"],
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main", "red_gate": "off"},
+	  "checks": [{"name": "bad", "layer": "unit", "gate": "self_verification", "argv": ["false"], "required": true}],
+	  "requirements": []
+	}`)
+	writeFile(t, filepath.Join(dir, "README"), "x\n")
+	gitInit(t, dir)
+	must(t, dir, ExitOK, "change", "create", "--goal", "失败")
+	must(t, dir, ExitCheck, "check", "--name", "bad")
+	st := must(t, dir, ExitOK, "status")
+	if namedCheck(t, st, "bad")["effective_status"] != "fail" {
+		t.Fatalf("有效状态应是 fail: %#v", namedCheck(t, st, "bad"))
+	}
+	if ev := planEvidenceKind(st, "bad"); ev != "fail" {
+		t.Fatalf("plan_view.evidence 应是 fail，不是 %q", ev)
+	}
+}
+
 func planHasSkip(st map[string]any, name, reason string) bool {
 	plan, _ := st["plan_view"].(map[string]any)
 	if plan == nil {
@@ -177,6 +232,21 @@ func planEvidence(st map[string]any, name string) string {
 		if cv["name"] == name {
 			note, _ := cv["evidence_note"].(string)
 			return note
+		}
+	}
+	return ""
+}
+
+func planEvidenceKind(st map[string]any, name string) string {
+	plan, _ := st["plan_view"].(map[string]any)
+	if plan == nil {
+		return ""
+	}
+	for _, item := range plan["checks"].([]any) {
+		cv := item.(map[string]any)
+		if cv["name"] == name {
+			kind, _ := cv["evidence"].(string)
+			return kind
 		}
 	}
 	return ""

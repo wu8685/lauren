@@ -1192,6 +1192,16 @@ func (a *app) cmdCheck(args []string) int {
 	if len(active) == 0 {
 		return a.fail(ExitUsage, "这次变更的计划里没有检查命令")
 	}
+	if err := WithChange(root, cid, func(ch *Change) error {
+		ch.syncCatalog(proj)
+		return nil
+	}); err != nil {
+		return a.fail(ExitUsage, err.Error())
+	}
+	ch0, err = readChange(root, cid)
+	if err != nil || ch0 == nil {
+		return a.fail(ExitUsage, "找不到变更")
+	}
 	fp := fingerprint(root, ch0.projectView(proj))
 	var runs []CheckRun
 	for _, spec := range specs {
@@ -1644,20 +1654,42 @@ func describePlan(root string, ch *Change, proj Project, fp Fingerprint) *planVi
 			item.ProjectArgv = redactArgs(lp.Argv)
 		}
 		if ch != nil {
-			if _, why := ch.satisfying(spec, proj, fp); why != "" {
-				item.Evidence = "stale"
-				if item.EvidenceNote == "" {
-					item.EvidenceNote = why
-				} else if !strings.Contains(why, item.EvidenceNote) {
-					item.EvidenceNote = why
-				}
-			} else {
-				item.Evidence = "pass"
+			ev, note := planCheckEvidence(ch, spec, proj, fp)
+			item.Evidence = ev
+			if note != "" {
+				item.EvidenceNote = note
 			}
 		}
 		view.Checks = append(view.Checks, item)
 	}
 	return view
+}
+
+func planCheckEvidence(ch *Change, spec CheckSpec, proj Project, fp Fingerprint) (string, string) {
+	var latest *CheckRun
+	for i := range ch.Runs {
+		r := &ch.Runs[i]
+		if r.Name != spec.Name || !envAccepted(spec, proj, r.Environment) {
+			continue
+		}
+		if latest == nil || r.Ended.After(latest.Ended) {
+			latest = r
+		}
+	}
+	if latest == nil {
+		return "missing", ""
+	}
+	eff := ch.effective(*latest, fp)
+	note := latest.Note
+	if eff == "stale" {
+		if why := resourceDriftReason(*latest); why != "" {
+			note = why
+		}
+	}
+	if eff == "" {
+		eff = "missing"
+	}
+	return eff, note
 }
 
 func redactArgs(argv []string) []string {
