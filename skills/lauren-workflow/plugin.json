@@ -1,0 +1,5 @@
+{
+  "name": "lauren",
+  "description": "Workflow guidance for the lauren CLI. Gate decisions stay in the CLI, not in this manifest.",
+  "version": "0.1.0"
+}
