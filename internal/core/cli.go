@@ -58,21 +58,15 @@ func Run(args []string, stdout, stderr io.Writer) int {
 }
 
 func (a *app) projectRoot() (string, error) {
-	if a.root != "" {
-		if _, err := os.Stat(filepath.Join(a.root, "lauren.project.json")); err != nil {
-			return "", err
-		}
-		abs, err := filepath.Abs(a.root)
+	start := a.root
+	if start == "" {
+		wd, err := os.Getwd()
 		if err != nil {
 			return "", err
 		}
-		return abs, nil
+		start = wd
 	}
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	return findRoot(wd)
+	return findRoot(start)
 }
 
 func (a *app) emit(code int, v any) int {
@@ -1329,7 +1323,7 @@ func (a *app) show(cmd string, id idFlag, hist bool) int {
 		return a.fail(ExitUsage, err.Error())
 	}
 	if cid == "" {
-		p := statusPayload{OK: true, Command: cmd, Next: []string{"创建变更"}}
+		p := statusPayload{OK: true, Command: cmd, Next: []string{"创建变更"}, Workspace: workspaceViewOf(root)}
 		if a.json {
 			return a.emit(ExitOK, p)
 		}
@@ -1438,28 +1432,29 @@ type facts struct {
 }
 
 type statusPayload struct {
-	OK              bool          `json:"ok"`
-	Command         string        `json:"command"`
-	ID              string        `json:"id,omitempty"`
-	Goal            string        `json:"goal,omitempty"`
-	Stage           string        `json:"stage,omitempty"`
-	Status          string        `json:"status,omitempty"`
-	Policy          *Policy       `json:"policy,omitempty"`
-	Block           string        `json:"block,omitempty"`
-	Candidate       Fingerprint   `json:"candidate,omitempty"`
-	Merge           *MergeRecord  `json:"merge,omitempty"`
-	ReleaseHold     bool          `json:"release_hold,omitempty"`
-	DeclaredVersion *VersionFact  `json:"declared_version,omitempty"`
-	ToolVersion     *VersionFact  `json:"tool_version,omitempty"`
-	Facts           *facts        `json:"facts,omitempty"`
-	Red             *redState     `json:"red,omitempty"`
-	Checks          []checkView   `json:"checks,omitempty"`
-	Problems        []problemView `json:"problems,omitempty"`
-	Reports         []reportView  `json:"reports,omitempty"`
-	Next            []string      `json:"next,omitempty"`
-	PlanPending     *PlanProposal `json:"plan_pending,omitempty"`
-	History         []Event       `json:"history,omitempty"`
-	Trust           string        `json:"trust,omitempty"`
+	OK              bool           `json:"ok"`
+	Command         string         `json:"command"`
+	ID              string         `json:"id,omitempty"`
+	Goal            string         `json:"goal,omitempty"`
+	Stage           string         `json:"stage,omitempty"`
+	Status          string         `json:"status,omitempty"`
+	Policy          *Policy        `json:"policy,omitempty"`
+	Block           string         `json:"block,omitempty"`
+	Candidate       Fingerprint    `json:"candidate,omitempty"`
+	Merge           *MergeRecord   `json:"merge,omitempty"`
+	ReleaseHold     bool           `json:"release_hold,omitempty"`
+	DeclaredVersion *VersionFact   `json:"declared_version,omitempty"`
+	ToolVersion     *VersionFact   `json:"tool_version,omitempty"`
+	Facts           *facts         `json:"facts,omitempty"`
+	Red             *redState      `json:"red,omitempty"`
+	Checks          []checkView    `json:"checks,omitempty"`
+	Problems        []problemView  `json:"problems,omitempty"`
+	Reports         []reportView   `json:"reports,omitempty"`
+	Next            []string       `json:"next,omitempty"`
+	PlanPending     *PlanProposal  `json:"plan_pending,omitempty"`
+	Workspace       *workspaceView `json:"workspace,omitempty"`
+	History         []Event        `json:"history,omitempty"`
+	Trust           string         `json:"trust,omitempty"`
 }
 
 func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint) statusPayload {
@@ -1467,7 +1462,8 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 		OK: true, Command: cmd, ID: ch.ID, Goal: ch.Goal, Stage: ch.Stage, Status: ch.Status,
 		Policy: &ch.Policy, Candidate: fp, Merge: ch.Merge, DeclaredVersion: ch.DeclaredVersion,
 		Next: nextActions(root, ch, proj, fp, libsFor(root, ch)), PlanPending: ch.PlanPending,
-		Trust: "本地状态文件可以被改写。这个 CLI 不认证人类，也不能防止恶意篡改。合并是否可信看仓库 CI 重跑；交付是否接受看来源被明确记下的接受记录。不会自动 merge、push、部署或通知。",
+		Trust:     "本地状态文件可以被改写。这个 CLI 不认证人类，也不能防止恶意篡改。合并是否可信看仓库 CI 重跑；交付是否接受看来源被明确记下的接受记录。不会自动 merge、push、部署或通知。",
+		Workspace: workspaceViewOf(root),
 	}
 	if ch.Block != nil && ch.Status == StatusBlocked {
 		p.Block = ch.Block.Reason
@@ -1561,7 +1557,31 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 	return p
 }
 
+type workspaceView struct {
+	Worktree     string `json:"worktree"`
+	Runtime      string `json:"runtime"`
+	ConfigPath   string `json:"config_path"`
+	ConfigMode   string `json:"config_mode"`
+	MainWorktree string `json:"main_worktree,omitempty"`
+	ResourceDir  string `json:"resource_dir,omitempty"`
+	Entry        string `json:"entry,omitempty"`
+}
+
+func workspaceViewOf(root string) *workspaceView {
+	lay, _, err := locate(root)
+	if err != nil {
+		return nil
+	}
+	return &workspaceView{
+		Worktree: lay.Worktree, Runtime: lay.Runtime, ConfigPath: lay.ConfigPath, ConfigMode: lay.ConfigMode,
+		MainWorktree: lay.MainWorktree, ResourceDir: lay.ResourceDir, Entry: lay.Entry,
+	}
+}
+
 func writeHuman(w io.Writer, p statusPayload) {
+	if p.Workspace != nil {
+		fmt.Fprintf(w, "工作区: %s\n配置来源: %s (%s)\n运行状态: %s\n", p.Workspace.Worktree, p.Workspace.ConfigPath, p.Workspace.ConfigMode, p.Workspace.Runtime)
+	}
 	if p.ID == "" {
 		fmt.Fprintln(w, "这个工作区没有进行中的变更")
 		fmt.Fprintln(w, "下一合法动作:")
