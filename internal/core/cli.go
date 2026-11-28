@@ -30,12 +30,14 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 	rest := fs.Args()
 	if len(rest) == 0 {
-		a.fail(ExitUsage, "用法：lauren init | change | check | status | history | next | skills")
+		a.fail(ExitUsage, "用法：lauren init | init-worktree | change | check | status | history | next | skills")
 		return ExitUsage
 	}
 	switch rest[0] {
 	case "init":
 		return a.cmdInit(rest[1:])
+	case "init-worktree":
+		return a.cmdInitWorktree(rest[1:])
 	case "check":
 		return a.cmdCheck(rest[1:])
 	case "status":
