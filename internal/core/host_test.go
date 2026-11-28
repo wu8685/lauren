@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -180,12 +181,33 @@ func TestHostRunFailureDoesNotBlockSession(t *testing.T) {
 	}
 }
 
+func TestHostRunTimeoutDropsLateStdout(t *testing.T) {
+	old := hostRunTimeout
+	hostRunTimeout = 80 * time.Millisecond
+	oldBody := hostRunBody
+	hostRunBody = func(ctx context.Context, a *app, host, home, start string) int {
+		<-ctx.Done()
+		fmt.Fprintln(a.out, "超时后的正文")
+		return ExitInternal
+	}
+	t.Cleanup(func() {
+		hostRunTimeout = old
+		hostRunBody = oldBody
+	})
+	var out, errb bytes.Buffer
+	code := Run([]string{"host", "run", "--host", "claude", "--home", t.TempDir()}, &out, &errb)
+	if code != ExitOK || out.Len() != 0 || !strings.Contains(errb.String(), "超时") {
+		t.Fatalf("超时后应退出 0，且不再把正文写入 stdout: code=%d stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+}
+
 func TestHostRunTimeoutAndMissingBinary(t *testing.T) {
 	old := hostRunTimeout
 	hostRunTimeout = 150 * time.Millisecond
 	oldBody := hostRunBody
 	hostRunBody = func(ctx context.Context, a *app, host, home, start string) int {
 		<-ctx.Done()
+		fmt.Fprintln(a.out, "超时后的正文")
 		return ExitInternal
 	}
 	t.Cleanup(func() {
@@ -195,8 +217,8 @@ func TestHostRunTimeoutAndMissingBinary(t *testing.T) {
 	start := time.Now()
 	var out, errb bytes.Buffer
 	code := Run([]string{"host", "run", "--host", "claude", "--home", t.TempDir()}, &out, &errb)
-	if code != ExitOK || out.Len() != 0 || time.Since(start) > time.Second || !strings.Contains(errb.String(), "超时") {
-		t.Fatalf("超时不能挂住会话: code=%d wait=%s stdout=%q stderr=%q", code, time.Since(start), out.String(), errb.String())
+	if code != ExitOK || out.Len() != 0 || strings.Contains(out.String(), "超时后的正文") || time.Since(start) > time.Second || !strings.Contains(errb.String(), "超时") {
+		t.Fatalf("超时不能挂住会话，也不能再写 stdout: code=%d wait=%s stdout=%q stderr=%q", code, time.Since(start), out.String(), errb.String())
 	}
 
 	root := moduleRoot(t)

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,7 +25,29 @@ var hostRunBody = func(ctx context.Context, a *app, host, home, start string) in
 	if ctx.Err() != nil {
 		return ExitInternal
 	}
-	return a.deliverHost(host, home, start)
+	return a.deliverHost(ctx, host, home, start)
+}
+
+// silentWriter 在截止时间之后丢掉写入。已经写出的字节保留。
+type silentWriter struct {
+	mu   sync.Mutex
+	drop bool
+	w    io.Writer
+}
+
+func (s *silentWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.drop {
+		return len(p), nil
+	}
+	return s.w.Write(p)
+}
+
+func (s *silentWriter) silence() {
+	s.mu.Lock()
+	s.drop = true
+	s.mu.Unlock()
 }
 
 type hostPlan struct {
@@ -186,26 +210,37 @@ func (a *app) cmdHostRun(args []string) int {
 	if err != nil {
 		return a.fail(ExitUsage, err.Error())
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hostRunTimeout)
+	out := &silentWriter{w: a.out}
+	previous := a.out
+	a.out = out
+	defer func() { a.out = previous }()
+
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	timer := time.AfterFunc(hostRunTimeout, func() {
+		out.silence()
+		cancel()
+	})
+	defer timer.Stop()
+
+	body := hostRunBody
 	done := make(chan int, 1)
 	go func() {
-		done <- hostRunBody(ctx, a, *host, home, start)
+		done <- body(ctx, a, *host, home, start)
 	}()
-	select {
-	case code := <-done:
-		if ctx.Err() != nil && code != ExitOK {
-			fmt.Fprintln(a.err, "session-context 超时，会话继续")
-			return ExitOK
-		}
-		return code
-	case <-ctx.Done():
+	code := <-done
+	if !timer.Stop() {
+		out.silence()
 		fmt.Fprintln(a.err, "session-context 超时，会话继续")
 		return ExitOK
 	}
+	return code
 }
 
-func (a *app) deliverHost(host, home, start string) int {
+func (a *app) deliverHost(ctx context.Context, host, home, start string) int {
+	if ctx.Err() != nil {
+		return ExitInternal
+	}
 	ok, err := repoAuthorized(home, start)
 	if err != nil {
 		return a.finishHostRun(host, false, err.Error())
@@ -213,12 +248,21 @@ func (a *app) deliverHost(host, home, start string) int {
 	if !ok {
 		return a.finishHostRun(host, false, "")
 	}
+	if ctx.Err() != nil {
+		return ExitInternal
+	}
 	view, code := assembleSession(start)
+	if ctx.Err() != nil {
+		return ExitInternal
+	}
 	if code != ExitOK {
 		return a.finishHostRun(host, false, view.Error)
 	}
 	if !view.Applicable {
 		return a.finishHostRun(host, false, "")
+	}
+	if ctx.Err() != nil {
+		return ExitInternal
 	}
 	if a.json {
 		return a.emit(ExitOK, hostRunView{
