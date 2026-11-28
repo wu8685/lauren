@@ -30,7 +30,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 	rest := fs.Args()
 	if len(rest) == 0 {
-		a.fail(ExitUsage, "用法：lauren init | init-worktree | change | check | status | history | next | session-context | skills")
+		a.fail(ExitUsage, "用法：lauren init | init-worktree | change | check | status | history | next | session-context | host | skills")
 		return ExitUsage
 	}
 	switch rest[0] {
@@ -48,6 +48,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return a.cmdNext(rest[1:])
 	case "session-context":
 		return a.cmdSessionContext(rest[1:])
+	case "host":
+		return a.cmdHost(rest[1:])
 	case "skills":
 		return a.cmdSkills(rest[1:])
 	case "change":

@@ -7,7 +7,7 @@ description: 用 lauren CLI 推进一次有明确目标的变更。适用于明�
 
 门禁只在 `lauren` 命令的退出码和 `status` / `next` 里。本 Skill 不复制通过条件，也不根据对话判断需求是否正确。
 
-开始工作时先执行 `lauren session-context`。它只读，不创建变更、不跑检查、不改状态。没有本地 JSON 入口时，按它给出的共享来源执行 `lauren init-worktree`，然后再读一次；已经有入口就不要再初始化。`.lauren/runtime/` 还不存在不等于未初始化。没有变更时按需求创建，不要补造历史。有变更时阶段和下一步与 `status` / `next` 相同。Red 缺失要真实执行，不要默认跳过。阻塞时先看原因，不要自动 resume，也不要自动接受、合并或发布。命令成功不表示宿主已经把这段上下文注入了会话。这里不是 lauren 项目时，结果是 not_applicable。
+开始工作时先执行 `lauren session-context`。它只读，不创建变更、不跑检查、不改状态。没有本地 JSON 入口时，按它给出的共享来源执行 `lauren init-worktree`，然后再读一次；已经有入口就不要再初始化。软链接入口还要有 Skill 和插件清单。`.lauren/runtime/` 还不存在不等于未初始化。没有变更时按需求创建，不要补造历史。有变更时阶段和下一步与 `status` / `next` 相同。`阻塞`、`取消`、`修订 policy`、恢复、接受、合入和发布要人决定。Red 缺失要真实执行，不要默认跳过。阻塞时先看原因，不要自动 resume。`host_injected` 为 false 表示没有观察到宿主会话。送达要用 `lauren host install` 先看范围，再 `--apply`；`skills check` 不会改宿主配置。钩子跑的是 `lauren host run`，失败或不是这个仓库时不要卡住会话。这里不是 lauren 项目时，结果是 not_applicable。
 
 1. 在当前 git worktree 里工作。配置可以是工作区根的 `lauren.project.json`，也可以是主检出 `.lauren/project/lauren.project.json` 的一份共享正文。本地入口只能是指向它的软链接，或只含 `shared_config` 的引用，不能在里面覆盖 checks，也不要做配置深合并。检查、候选、锁和 runtime 都在当前 Worktree，不要把主工作区当成这次候选。共享脚本用 `resource:` 引用 `.lauren/project/` 里的文件，检查的 cwd 仍是当前 Worktree。不要用 `..`，也不要自己展开环境变量。环境和集成分支的差别用这次变更的 policy。新 Worktree 在 `git worktree add` 之后执行 `lauren init-worktree`。它只建软链接入口和本地排除，不复制 runtime，不创建变更，入口里不写 checks。重复执行是安全的。根上已有普通配置文件时不要删，按提示人工迁移。
 2. 创建变更：`lauren change create --goal "<目标>"`。需要覆盖项目默认值时，用 `--environment`、`--release-stage included|excluded`、`--artifact-level standard|abbreviated`、`--integration-branch` 或 `--integration-intent not_in_current_iteration`。可选检查可以 `--skip 名称=理由`。必过检查不能跳过。创建时会把检查计划冻住。过了明确需求就不能直接改计划。先 `change plan propose`，然后请用户自己执行 `change plan confirm --owner-confirmed`。不要自己加上 `--owner-confirmed`。
