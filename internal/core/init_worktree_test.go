@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	skillbundle "github.com/wu8685/lauren/skills/lauren-workflow"
 )
 
 func gitPorcelain(t *testing.T, dir string) string {
@@ -184,6 +186,83 @@ func TestInitWorktreeRefusesUnmanaged(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestUndoKeepsOtherWorktreeExcluded(t *testing.T) {
+	_, a, b := setupSharedRepo(t)
+	os.Remove(filepath.Join(b, "marker.txt"))
+	must(t, a, ExitOK, "init-worktree")
+	must(t, b, ExitOK, "init-worktree")
+	writeFile(t, filepath.Join(b, "svc", "lauren.project.json"), "{}\n")
+	if gitIgnored(t, b, "svc/lauren.project.json") {
+		t.Fatal("排除规则不应藏起子目录里的 lauren.project.json")
+	}
+	if !gitIgnored(t, b, "lauren.project.json") {
+		t.Fatal("工作区根的入口应被排除")
+	}
+	must(t, b, ExitOK, "change", "create", "--goal", "B 保持")
+	before := must(t, b, ExitOK, "status")["candidate"].(map[string]any)
+	must(t, a, ExitOK, "init-worktree", "--undo")
+	if !gitIgnored(t, b, "lauren.project.json") {
+		t.Fatal("撤销 A 后，B 的入口不应变成未跟踪文件")
+	}
+	if gitIgnored(t, b, "svc/lauren.project.json") {
+		t.Fatal("撤销后仍不应藏起子目录里的同名文件")
+	}
+	after := must(t, b, ExitOK, "status")["candidate"].(map[string]any)
+	if before["hash"] != after["hash"] || before["dirty"] != after["dirty"] {
+		t.Fatalf("撤销 A 不应改变 B 的候选: before=%#v after=%#v", before, after)
+	}
+}
+
+func gitIgnored(t *testing.T, dir, rel string) bool {
+	t.Helper()
+	_, err := gitOut(dir, "check-ignore", "-q", "--", rel)
+	return err == nil
+}
+
+func TestInitWorktreeEmbeddedSkillOutsideRepo(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoSkill := wd
+	for {
+		if _, err := os.Stat(filepath.Join(repoSkill, "skills", "lauren-workflow", "SKILL.md")); err == nil {
+			break
+		}
+		parent := filepath.Dir(repoSkill)
+		if parent == repoSkill {
+			t.Fatal("找不到仓库里的 Skill")
+		}
+		repoSkill = parent
+	}
+	diskSkill, err := os.ReadFile(filepath.Join(repoSkill, "skills", "lauren-workflow", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	diskPlugin, err := os.ReadFile(filepath.Join(repoSkill, ".claude-plugin", "plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(diskSkill) != string(skillbundle.SkillMD) || string(diskPlugin) != string(skillbundle.PluginJSON) {
+		t.Fatal("打进二进制的 Skill 或插件清单和仓库文件不一致")
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	main, a, _ := setupSharedRepo(t)
+	os.Remove(filepath.Join(a, "marker.txt"))
+	must(t, a, ExitOK, "init-worktree")
+	must(t, a, ExitOK, "skills", "check")
+	got, err := os.ReadFile(filepath.Join(main, ".lauren", "project", "skills", "lauren-workflow", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(skillbundle.SkillMD) {
+		t.Fatal("仓库外执行也应写入二进制里的 Skill")
+	}
 }
 
 func TestInitWorktreePreviewUndoAndMetadata(t *testing.T) {

@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/wu8685/lauren/skills/lauren-workflow"
 )
 
 const (
@@ -118,14 +119,14 @@ func planWorktreeInit(top string) (plannedInit, error) {
 		managed = append(managed, filepath.ToSlash(link.rel))
 	}
 	exclude := []string{
-		".lauren/runtime/",
-		".lauren/reports/",
-		".lauren/init.json",
-		"lauren.project.json",
-		"skills/lauren-workflow",
-		".agents/skills/lauren-workflow",
-		".claude/skills/lauren-workflow",
-		".claude-plugin/plugin.json",
+		"/.lauren/runtime/",
+		"/.lauren/reports/",
+		"/.lauren/init.json",
+		"/lauren.project.json",
+		"/skills/lauren-workflow",
+		"/.agents/skills/lauren-workflow",
+		"/.claude/skills/lauren-workflow",
+		"/.claude-plugin/plugin.json",
 	}
 	return plannedInit{
 		worktree: top, shared: shared, entry: filepath.Join(top, "lauren.project.json"),
@@ -196,70 +197,22 @@ func sharedResourcePaths(sharedFile string) (string, string) {
 func ensureSharedSkill(sharedFile string) error {
 	skillDir, plugin := sharedResourcePaths(sharedFile)
 	if st, err := os.Stat(filepath.Join(skillDir, "SKILL.md")); err != nil || st.IsDir() {
-		src, serr := bundledSkillDir()
-		if serr != nil {
-			return serr
+		if err := os.MkdirAll(skillDir, 0o755); err != nil {
+			return fmt.Errorf("无法写入共享 Skill：%w", err)
 		}
-		if err := copyTree(src, skillDir); err != nil {
+		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), skillbundle.SkillMD, 0o644); err != nil {
 			return fmt.Errorf("无法写入共享 Skill：%w", err)
 		}
 	}
 	if _, err := os.Stat(plugin); err != nil {
-		srcDir, serr := bundledSkillDir()
-		if serr != nil {
-			return serr
+		if err := os.MkdirAll(filepath.Dir(plugin), 0o755); err != nil {
+			return fmt.Errorf("无法写入共享插件清单：%w", err)
 		}
-		pluginSrc := filepath.Join(filepath.Dir(filepath.Dir(srcDir)), ".claude-plugin", "plugin.json")
-		if err := copyFile(pluginSrc, plugin); err != nil {
+		if err := os.WriteFile(plugin, skillbundle.PluginJSON, 0o644); err != nil {
 			return fmt.Errorf("无法写入共享插件清单：%w", err)
 		}
 	}
 	return nil
-}
-
-func bundledSkillDir() (string, error) {
-	var starts []string
-	if wd, err := os.Getwd(); err == nil {
-		starts = append(starts, wd)
-	}
-	if exe, err := os.Executable(); err == nil {
-		starts = append(starts, filepath.Dir(exe))
-	}
-	for _, start := range starts {
-		dir := start
-		for {
-			cand := filepath.Join(dir, "skills", "lauren-workflow", "SKILL.md")
-			if st, err := os.Stat(cand); err == nil && !st.IsDir() {
-				return filepath.Join(dir, "skills", "lauren-workflow"), nil
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
-		}
-	}
-	return "", fmt.Errorf("找不到 lauren 自带的 Skill。请在 lauren 仓库里执行，或把 Skill 放到共享目录 .lauren/project/skills/lauren-workflow/")
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	if _, err := io.Copy(out, in); err != nil {
-		return err
-	}
-	return out.Close()
 }
 
 func checkLink(top string, link linkPlan) error {
@@ -422,8 +375,14 @@ func (a *app) undoWorktreeInit(top string) int {
 			return a.fail(ExitUsage, "无法去掉入口 "+rel)
 		}
 	}
-	if err := removeExcludeBlock(top); err != nil {
+	others, err := otherWorktreeStillInitialized(top)
+	if err != nil {
 		return a.fail(ExitUsage, err.Error())
+	}
+	if !others {
+		if err := removeExcludeBlock(top); err != nil {
+			return a.fail(ExitUsage, err.Error())
+		}
 	}
 	if err := os.Remove(metaPath); err != nil && !os.IsNotExist(err) {
 		return a.fail(ExitUsage, err.Error())
@@ -433,6 +392,27 @@ func (a *app) undoWorktreeInit(top string) int {
 	}
 	fmt.Fprintln(a.out, "已撤销受管入口")
 	return ExitOK
+}
+
+func otherWorktreeStillInitialized(current string) (bool, error) {
+	paths, err := worktreeList(current)
+	if err != nil {
+		return false, err
+	}
+	for _, p := range paths {
+		if samePath(p, current) {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(p, ".lauren", "init.json"))
+		if err != nil {
+			continue
+		}
+		var meta worktreeInitMeta
+		if json.Unmarshal(b, &meta) == nil && meta.Kind == "worktree-init" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func removeExcludeBlock(worktree string) error {
