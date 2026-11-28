@@ -30,7 +30,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 	rest := fs.Args()
 	if len(rest) == 0 {
-		a.fail(ExitUsage, "用法：lauren init | init-worktree | change | check | status | history | next | skills")
+		a.fail(ExitUsage, "用法：lauren init | init-worktree | change | check | status | history | next | session-context | skills")
 		return ExitUsage
 	}
 	switch rest[0] {
@@ -46,6 +46,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return a.cmdHistory(rest[1:])
 	case "next":
 		return a.cmdNext(rest[1:])
+	case "session-context":
+		return a.cmdSessionContext(rest[1:])
 	case "skills":
 		return a.cmdSkills(rest[1:])
 	case "change":
@@ -1477,7 +1479,7 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 		OK: true, Command: cmd, ID: ch.ID, Goal: ch.Goal, Stage: ch.Stage, Status: ch.Status,
 		Policy: &ch.Policy, Candidate: fp, Merge: ch.Merge, DeclaredVersion: ch.DeclaredVersion,
 		Next: nextActions(root, ch, proj, fp, libsFor(root, ch)), PlanPending: ch.PlanPending,
-		Trust:     "本地状态文件可以被改写。这个 CLI 不认证人类，也不能防止恶意篡改。合并是否可信看仓库 CI 重跑；交付是否接受看来源被明确记下的接受记录。不会自动 merge、push、部署或通知。",
+		Trust:     trustNote,
 		Workspace: workspaceViewOf(root),
 		PlanView:  describePlan(root, ch, proj, fp),
 	}
