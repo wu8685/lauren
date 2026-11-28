@@ -1385,6 +1385,8 @@ type checkView struct {
 	LogDigest       string `json:"log_digest,omitempty"`
 	Executed        *int   `json:"executed,omitempty"`
 	Skipped         *int   `json:"skipped,omitempty"`
+	ResourceNote    string `json:"resource_note,omitempty"`
+	ToolPath        string `json:"tool_path,omitempty"`
 }
 
 type reportView struct {
@@ -1480,12 +1482,25 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 			continue
 		}
 		seen[r.Name+"@"+r.Environment] = true
+		note := r.Note
+		if ch.effective(r, fp) == "stale" {
+			if why := resourceDriftReason(r); why != "" {
+				if note == "" {
+					note = why
+				} else {
+					note += "；" + why
+				}
+			}
+		}
+		if note == "" {
+			note = r.ResourceNote
+		}
 		p.Checks = append([]checkView{{
 			Name: r.Name, Layer: r.Layer, Gate: r.Gate, Environment: r.Environment,
 			Status: r.Status, EffectiveStatus: ch.effective(r, fp), ExitCode: r.ExitCode,
-			Cwd: r.Cwd, LogPath: r.LogPath, LogBytes: r.LogBytes, Preview: r.Preview, Note: r.Note,
+			Cwd: r.Cwd, LogPath: r.LogPath, LogBytes: r.LogBytes, Preview: r.Preview, Note: note,
 			TimeoutSeconds: r.TimeoutSeconds, Classification: r.Classification, LogDigest: r.LogDigest,
-			Executed: r.Executed, Skipped: r.Skipped,
+			Executed: r.Executed, Skipped: r.Skipped, ResourceNote: r.ResourceNote, ToolPath: r.ToolPath,
 		}}, p.Checks...)
 	}
 	product := len(proj.Requirements) > 0
@@ -1748,6 +1763,6 @@ func (a *app) cmdSkills(args []string) int {
 	if a.json {
 		return a.emit(ExitOK, map[string]any{"ok": true, "command": "skills check", "skill": skill})
 	}
-	fmt.Fprintln(a.out, "Skill 入口可用。门禁仍只在 lauren CLI 里。")
+	fmt.Fprintln(a.out, "Skill 入口可用。门禁仍只在 lauren CLI 里。这不表示宿主已经注入了这段上下文。")
 	return ExitOK
 }
