@@ -186,6 +186,44 @@ func TestCheckSyncsCatalogWithoutStatus(t *testing.T) {
 	}
 }
 
+func TestStaleEvidenceNoteMatchesAdvance(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{
+	  "schema": 1,
+	  "environments": ["development", "integration", "staging", "production"],
+	  "defaults": {"environment": "development", "release_stage": "excluded", "artifact_level": "standard", "integration_branch": "main", "red_gate": "off"},
+	  "checks": [{"name": "t", "layer": "unit", "gate": "self_verification", "argv": ["true"], "required": true}],
+	  "requirements": []
+	}`)
+	writeFile(t, filepath.Join(dir, "f"), "x\n")
+	writeFile(t, filepath.Join(dir, "artifacts", "demand.json"), `{"goal":"g","acceptance":["a"],"baseline":"b"}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "plan.json"), `{"approach":"a","risks":"r","prechecks":["p"]}`)
+	writeFile(t, filepath.Join(dir, "artifacts", "impl.json"), `{"summary":"s"}`)
+	gitInit(t, dir)
+	must(t, dir, ExitOK, "change", "create", "--goal", "g")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/demand.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/plan.json")
+	must(t, dir, ExitOK, "change", "advance")
+	must(t, dir, ExitOK, "change", "submit", "--artifact", "artifacts/impl.json")
+	must(t, dir, ExitOK, "check", "--name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("x\ny\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := must(t, dir, ExitOK, "status")
+	if ev := planEvidenceKind(st, "t"); ev != "stale" {
+		t.Fatalf("候选变了应为 stale，得到 %q", ev)
+	}
+	note := planEvidence(st, "t")
+	if note == "" {
+		t.Fatal("普通 stale 也应有 evidence_note")
+	}
+	_, m, errb := runAt(t, dir, "change", "advance")
+	if errText(m, errb) != note {
+		t.Fatalf("evidence_note 应与 advance 相同:\nnote=%s\nadvance=%s", note, errText(m, errb))
+	}
+}
+
 func TestPlanEvidenceDistinguishesFail(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "lauren.project.json"), `{

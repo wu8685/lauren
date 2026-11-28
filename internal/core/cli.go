@@ -1666,6 +1666,7 @@ func describePlan(root string, ch *Change, proj Project, fp Fingerprint) *planVi
 }
 
 func planCheckEvidence(ch *Change, spec CheckSpec, proj Project, fp Fingerprint) (string, string) {
+	_, why := ch.satisfying(spec, proj, fp)
 	var latest *CheckRun
 	for i := range ch.Runs {
 		r := &ch.Runs[i]
@@ -1676,20 +1677,17 @@ func planCheckEvidence(ch *Change, spec CheckSpec, proj Project, fp Fingerprint)
 			latest = r
 		}
 	}
+	if why == "" {
+		return "pass", ""
+	}
 	if latest == nil {
-		return "missing", ""
+		return "missing", why
 	}
 	eff := ch.effective(*latest, fp)
-	note := latest.Note
-	if eff == "stale" {
-		if why := resourceDriftReason(*latest); why != "" {
-			note = why
-		}
+	if eff == "" || eff == "pass" {
+		eff = "stale"
 	}
-	if eff == "" {
-		eff = "missing"
-	}
-	return eff, note
+	return eff, why
 }
 
 func redactArgs(argv []string) []string {
