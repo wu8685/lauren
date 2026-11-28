@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func runHuman(t *testing.T, dir string, args ...string) (int, string, string) {
@@ -225,6 +226,18 @@ func TestSessionContextMatchesStatusNext(t *testing.T) {
 	if sc["stage"] != st["stage"] || sc["status"] != st["status"] || sc["id"] != st["id"] {
 		t.Fatalf("阶段应与 status 相同: context=%v status=%v", sc, st)
 	}
+	sawHuman := false
+	for _, line := range jsonStrings(t, sc, "guidance") {
+		if strings.HasPrefix(line, "可继续的动作") && (strings.Contains(line, "阻塞") || strings.Contains(line, "取消") || strings.Contains(line, "修订 policy")) {
+			t.Fatalf("阻塞、取消和修订 policy 不是可继续的动作: %s", line)
+		}
+		if strings.HasPrefix(line, "要人决定") && strings.Contains(line, "阻塞") && strings.Contains(line, "取消") && strings.Contains(line, "修订 policy") {
+			sawHuman = true
+		}
+	}
+	if !sawHuman {
+		t.Fatalf("这几项应单独标成要人决定: %s", guidanceText(t, sc))
+	}
 	if !reflect.DeepEqual(jsonStrings(t, sc, "next"), jsonStrings(t, nx, "next")) || !reflect.DeepEqual(jsonStrings(t, sc, "next"), jsonStrings(t, st, "next")) {
 		t.Fatalf("下一步应与 next 相同:\ncontext=%v\nnext=%v", sc["next"], nx["next"])
 	}
@@ -306,6 +319,48 @@ func TestSessionContextRedIsNotSkipped(t *testing.T) {
 	}
 	if must(t, dir, ExitOK, "status")["stage"] != StageBuild {
 		t.Fatal("不能自动推进")
+	}
+}
+
+func TestSessionContextEntryIncludesSkillLinks(t *testing.T) {
+	_, a, _ := setupSharedRepo(t)
+	must(t, a, ExitOK, "init-worktree")
+	if must(t, a, ExitOK, "session-context")["entry_ready"] != true {
+		t.Fatal("Skill 和插件入口都在时应就绪")
+	}
+	if err := os.Remove(filepath.Join(a, ".claude-plugin", "plugin.json")); err != nil {
+		t.Fatal(err)
+	}
+	st := must(t, a, ExitOK, "session-context")
+	if st["entry_ready"] != false {
+		t.Fatal("插件清单软链接缺失时不应报入口就绪")
+	}
+	if !strings.Contains(guidanceText(t, st), "init-worktree") || !strings.Contains(guidanceText(t, st), "插件") {
+		t.Fatalf("应指出插件入口并要求重新初始化: %s", guidanceText(t, st))
+	}
+}
+
+func TestSessionContextOutsideGitEntryIsGit(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Symlink("missing.json", filepath.Join(dir, "lauren.project.json")); err != nil {
+		t.Fatal(err)
+	}
+	code, m, errb := runAt(t, dir, "session-context")
+	text := errText(m, errb)
+	if code == ExitOK || m["kind"] != "git" || !strings.Contains(text, "不是 git 工作区") {
+		t.Fatalf("主工作区不在 git 里应是 git 诊断，不是 config: %d %#v %s", code, m, text)
+	}
+}
+
+func TestSessionTextCutsOnRuneBoundary(t *testing.T) {
+	long := strings.Repeat("中", 2000)
+	got := clipUTF8Bytes(long, 4000)
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, "输出已截断\n") {
+		t.Fatalf("应按完整字符截断: valid=%t tail=%q", utf8.ValidString(got), got[len(got)-20:])
+	}
+	body := strings.TrimSuffix(got, "\n输出已截断\n")
+	if len(body) > 4000 || strings.Contains(body, "\uFFFD") {
+		t.Fatalf("截断不应留下半个字符: %d", len(body))
 	}
 }
 

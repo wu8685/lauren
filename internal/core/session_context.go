@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 // trustNote 是 status 和 session-context 共用的信任边界。来源声明不是身份认证。
@@ -34,36 +36,53 @@ type sessionView struct {
 	Red            *redState      `json:"red,omitempty"`
 	Guidance       []string       `json:"guidance,omitempty"`
 	Trust          string         `json:"trust,omitempty"`
+	Injection      string         `json:"injection,omitempty"`
 }
+
+const injectionNote = "host_injected 只表示有没有观察到宿主会话收下这段文字。本命令不启动宿主，所以这里恒为 false。送达要靠 lauren host install 写下的 SessionStart 钩子执行 lauren host run。配置文件写好不等于已经注入。"
 
 func (a *app) cmdSessionContext(args []string) int {
 	if len(args) != 0 {
 		return a.fail(ExitUsage, "用法：lauren session-context")
 	}
-	start := a.root
-	if strings.TrimSpace(start) == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return a.contextFail("config", err.Error())
-		}
-		start = wd
+	start, err := a.startDir()
+	if err != nil {
+		return a.contextFail("config", err.Error())
 	}
+	view, code := assembleSession(start)
+	if code != ExitOK {
+		return a.contextFail(view.Kind, view.Error)
+	}
+	if a.json {
+		return a.emit(ExitOK, view)
+	}
+	if !view.Applicable {
+		fmt.Fprintln(a.out, "不适用")
+		return ExitOK
+	}
+	writeSession(a.out, view)
+	return ExitOK
+}
+
+func (a *app) startDir() (string, error) {
+	if strings.TrimSpace(a.root) != "" {
+		return a.root, nil
+	}
+	return os.Getwd()
+}
+
+func assembleSession(start string) (sessionView, int) {
 	lay, proj, err := locate(start)
 	if err != nil {
 		kind, quiet := contextErrorKind(err)
 		if quiet {
-			view := sessionView{OK: true, Command: "session-context", Applicable: false, Kind: "not_applicable"}
-			if a.json {
-				return a.emit(ExitOK, view)
-			}
-			fmt.Fprintln(a.out, "不适用")
-			return ExitOK
+			return sessionView{OK: true, Command: "session-context", Applicable: false, Kind: "not_applicable"}, ExitOK
 		}
-		return a.contextFail(kind, err.Error())
+		return sessionView{OK: false, Command: "session-context", Applicable: false, Kind: kind, Error: err.Error()}, ExitUsage
 	}
 	ch, err := readCurrentChange(lay.Worktree)
 	if err != nil {
-		return a.contextFail("state", err.Error())
+		return sessionView{OK: false, Command: "session-context", Applicable: false, Kind: "state", Error: err.Error()}, ExitUsage
 	}
 	ready := entryReady(lay)
 	present := runtimePresent(lay.Runtime)
@@ -73,6 +92,7 @@ func (a *app) cmdSessionContext(args []string) int {
 		EntryReady:     boolPtr(ready),
 		RuntimePresent: boolPtr(present),
 		Trust:          trustNote,
+		Injection:      injectionNote,
 	}
 	var next []string
 	if ch == nil {
@@ -94,12 +114,8 @@ func (a *app) cmdSessionContext(args []string) int {
 		}
 	}
 	view.Next = next
-	view.Guidance = sessionGuidance(ready, ch, proj, next)
-	if a.json {
-		return a.emit(ExitOK, view)
-	}
-	writeSession(a.out, view)
-	return ExitOK
+	view.Guidance = sessionGuidance(ready, linksMissing(lay), ch, proj, next)
+	return view, ExitOK
 }
 
 func (a *app) contextFail(kind, msg string) int {
@@ -119,6 +135,8 @@ func contextErrorKind(err error) (string, bool) {
 		return "broken_link", false
 	case strings.Contains(msg, "无法定位主工作区"):
 		return "git", false
+	case strings.Contains(msg, "不是 git 工作区") && strings.Contains(msg, "不能解析共享配置引用"):
+		return "git", false
 	case strings.Contains(msg, "旧的单层"),
 		strings.Contains(msg, "不在 worktree 根"),
 		strings.Contains(msg, "没有 .lauren/project/lauren.project.json"),
@@ -137,11 +155,39 @@ func contextErrorKind(err error) (string, bool) {
 
 func entryReady(lay Layout) bool {
 	switch lay.ConfigMode {
-	case modeLegacy, modeSymlink, modeReference:
+	case modeLegacy:
 		return true
+	case modeSymlink, modeReference:
+		return lay.Entry != "" && managedLinksReady(lay.Worktree)
 	default:
 		return lay.Entry != ""
 	}
+}
+
+func linksMissing(lay Layout) bool {
+	if lay.ConfigMode != modeSymlink && lay.ConfigMode != modeReference {
+		return false
+	}
+	return !managedLinksReady(lay.Worktree)
+}
+
+func managedLinksReady(top string) bool {
+	for _, rel := range []string{
+		filepath.Join("skills", "lauren-workflow"),
+		filepath.Join(".agents", "skills", "lauren-workflow"),
+		filepath.Join(".claude", "skills", "lauren-workflow"),
+		filepath.Join(".claude-plugin", "plugin.json"),
+	} {
+		p := filepath.Join(top, rel)
+		fi, err := os.Lstat(p)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			return false
+		}
+		if _, err := filepath.EvalSymlinks(p); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func runtimePresent(path string) bool {
@@ -181,10 +227,14 @@ func readCurrentChange(root string) (*Change, error) {
 	return open, nil
 }
 
-func sessionGuidance(ready bool, ch *Change, proj Project, next []string) []string {
+func sessionGuidance(ready, linkGap bool, ch *Change, proj Project, next []string) []string {
 	var g []string
 	if !ready {
-		g = append(g, "本地还没有配置入口。执行 lauren init-worktree，然后再次读取 session-context 确认入口已就绪。")
+		if linkGap {
+			g = append(g, "配置入口在，但 Skill 或插件清单的软链接还没有或已断开。执行 lauren init-worktree，然后再次读取 session-context。")
+		} else {
+			g = append(g, "本地还没有配置入口。执行 lauren init-worktree，然后再次读取 session-context 确认入口已就绪。")
+		}
 	}
 	if ch == nil {
 		if ready {
@@ -203,24 +253,31 @@ func sessionGuidance(ready bool, ch *Change, proj Project, next []string) []stri
 	if redGap(proj, ch) {
 		g = append(g, "Red 还没有先失败再通过的记录。要真实执行检查，让它先失败并写出分类，再跑通过。不要跳过 Red。")
 	}
-	var safe []string
-	over := false
+	var safe, human []string
 	for _, n := range next {
-		switch n {
-		case "恢复", "记录交付接受", "记录合入集成分支", "记录发布声明", "人确认后释放共享环境占用":
-			over = true
-		default:
+		if humanDecision(n) {
+			human = append(human, n)
+		} else {
 			safe = append(safe, n)
 		}
 	}
 	if len(safe) > 0 {
 		g = append(g, "可继续的动作："+strings.Join(safe, "、")+"。")
 	}
-	if over || ch.Status == StatusBlocked {
-		g = append(g, "交付接受、合入、发布和解除阻塞要由人决定。不会自动接受、合并、发布或 resume。")
+	if len(human) > 0 {
+		g = append(g, "要人决定："+strings.Join(human, "、")+"。不会自动接受、合并、发布或 resume。")
 	}
 	g = append(g, "这条命令的成功不表示宿主已经注入了上下文。")
 	return g
+}
+
+func humanDecision(n string) bool {
+	switch n {
+	case "恢复", "记录交付接受", "记录合入集成分支", "记录发布声明", "人确认后释放共享环境占用", "阻塞", "取消", "修订 policy":
+		return true
+	default:
+		return false
+	}
 }
 
 func redGap(proj Project, ch *Change) bool {
@@ -237,6 +294,17 @@ func redGap(proj Project, ch *Change) bool {
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+func clipUTF8Bytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.ValidString(s[:cut]) {
+		cut--
+	}
+	return s[:cut] + "\n输出已截断\n"
+}
 
 func clipText(s string, n int) string {
 	r := []rune(s)
@@ -289,9 +357,5 @@ func writeSession(w io.Writer, v sessionView) {
 	if v.Trust != "" {
 		fmt.Fprintln(&b, "信任: "+v.Trust)
 	}
-	out := b.String()
-	if len(out) > contextLimitBytes {
-		out = out[:contextLimitBytes] + "\n输出已截断\n"
-	}
-	io.WriteString(w, out)
+	io.WriteString(w, clipUTF8Bytes(b.String(), contextLimitBytes))
 }
