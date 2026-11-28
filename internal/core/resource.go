@@ -121,6 +121,9 @@ func stampOne(path string) (ResourceStamp, error) {
 	if err != nil {
 		return ResourceStamp{}, fmt.Errorf("资源不存在：%s", path)
 	}
+	if fi.IsDir() {
+		return ResourceStamp{}, fmt.Errorf("暂不支持目录，请列出文件：%s", path)
+	}
 	st := ResourceStamp{Path: path}
 	if fi.Mode()&os.ModeSymlink != 0 {
 		link, err := os.Readlink(path)
@@ -128,6 +131,13 @@ func stampOne(path string) (ResourceStamp, error) {
 			return ResourceStamp{}, fmt.Errorf("资源不存在：%s", path)
 		}
 		st.Link = link
+		target, err := os.Stat(path)
+		if err != nil {
+			return ResourceStamp{}, fmt.Errorf("资源不存在：%s", path)
+		}
+		if target.IsDir() {
+			return ResourceStamp{}, fmt.Errorf("暂不支持目录，请列出文件：%s", path)
+		}
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
