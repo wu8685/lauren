@@ -7,7 +7,7 @@ description: 用 lauren CLI 推进一次有明确目标的变更。适用于明�
 
 门禁只在 `lauren` 命令的退出码和 `status` / `next` 里。本 Skill 不复制通过条件，也不根据对话判断需求是否正确。
 
-1. 在含有 `lauren.project.json` 的项目根目录工作。该目录必须是 git 根。
+1. 在当前 git worktree 里工作。配置可以是工作区根的 `lauren.project.json`，也可以是主检出 `.lauren/project/lauren.project.json` 的一份共享正文。本地入口只能是指向它的软链接，或只含 `shared_config` 的引用，不能在里面覆盖 checks，也不要做配置深合并。检查、候选、锁和 runtime 都在当前 Worktree，不要把主工作区当成这次候选。环境和集成分支的差别用这次变更的 policy。
 2. 创建变更：`lauren change create --goal "<目标>"`。需要覆盖项目默认值时，用 `--environment`、`--release-stage included|excluded`、`--artifact-level standard|abbreviated`、`--integration-branch` 或 `--integration-intent not_in_current_iteration`。可选检查可以 `--skip 名称=理由`。必过检查不能跳过。创建时会把检查计划冻住。过了明确需求就不能直接改计划。先 `change plan propose`，然后请用户自己执行 `change plan confirm --owner-confirmed`。不要自己加上 `--owner-confirmed`。
 3. 用 `lauren next` 看下一合法动作，用 `lauren status` 看阶段、policy、检查环境和几件分开的事实。
 4. 当前阶段产物用 `lauren change submit --artifact <项目内相对路径>` 提交。精简记录也不取消必过检查。

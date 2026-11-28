@@ -25,7 +25,7 @@ func fingerprint(root string, proj Project) Fingerprint {
 	top = strings.TrimSpace(top)
 	absTop, _ := filepath.Abs(top)
 	absRoot, _ := filepath.Abs(root)
-	if absTop != absRoot {
+	if !samePath(absTop, absRoot) {
 		return Fingerprint{Kind: "not-root", Note: "lauren.project.json 所在目录不是 git 根。不把父仓库当成这个项目的候选。"}
 	}
 	head, err := gitOut(root, "rev-parse", "HEAD")
@@ -111,7 +111,7 @@ func ignoredCandidate(path string, proj Project) bool {
 
 func skipPath(path string) bool {
 	p := strings.TrimPrefix(path, "./")
-	return p == ".lauren/runtime" || strings.HasPrefix(p, ".lauren/runtime/") || p == ".lauren/problems" || strings.HasPrefix(p, ".lauren/problems/") || p == ".lauren" || strings.HasPrefix(p, ".git/")
+	return p == ".lauren/runtime" || strings.HasPrefix(p, ".lauren/runtime/") || p == ".lauren/problems" || strings.HasPrefix(p, ".lauren/problems/") || p == ".lauren/project" || strings.HasPrefix(p, ".lauren/project/") || p == ".lauren" || strings.HasPrefix(p, ".git/")
 }
 
 type porcelainEntry struct {

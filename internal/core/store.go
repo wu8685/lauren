@@ -260,21 +260,8 @@ func writeAtomicJSON(path string, v any) error {
 }
 
 func loadProject(root string) (Project, error) {
-	b, err := os.ReadFile(filepath.Join(root, "lauren.project.json"))
-	if err != nil {
-		return Project{}, fmt.Errorf("读取 lauren.project.json：%w", err)
-	}
-	var p Project
-	if err := json.Unmarshal(b, &p); err != nil {
-		return Project{}, fmt.Errorf("lauren.project.json 无法解析：%w", err)
-	}
-	if p.Schema == 0 {
-		p.Schema = 1
-	}
-	if err := p.validate(); err != nil {
-		return Project{}, err
-	}
-	return p, nil
+	_, proj, err := locate(root)
+	return proj, err
 }
 
 func (p Project) promoteThreshold() int {
@@ -366,20 +353,11 @@ func (p Project) validate() error {
 }
 
 func findRoot(start string) (string, error) {
-	d, err := filepath.Abs(start)
+	lay, _, err := locate(start)
 	if err != nil {
 		return "", err
 	}
-	for {
-		if _, err := os.Stat(filepath.Join(d, "lauren.project.json")); err == nil {
-			return d, nil
-		}
-		parent := filepath.Dir(d)
-		if parent == d {
-			return "", fmt.Errorf("从 %s 向上未找到 lauren.project.json", start)
-		}
-		d = parent
-	}
+	return lay.Worktree, nil
 }
 
 func worktreeRoots(root string) []string {
