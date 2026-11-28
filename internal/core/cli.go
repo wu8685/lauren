@@ -1192,6 +1192,16 @@ func (a *app) cmdCheck(args []string) int {
 	if len(active) == 0 {
 		return a.fail(ExitUsage, "这次变更的计划里没有检查命令")
 	}
+	if err := WithChange(root, cid, func(ch *Change) error {
+		ch.syncCatalog(proj)
+		return nil
+	}); err != nil {
+		return a.fail(ExitUsage, err.Error())
+	}
+	ch0, err = readChange(root, cid)
+	if err != nil || ch0 == nil {
+		return a.fail(ExitUsage, "找不到变更")
+	}
 	fp := fingerprint(root, ch0.projectView(proj))
 	var runs []CheckRun
 	for _, spec := range specs {
@@ -1326,24 +1336,24 @@ func (a *app) show(cmd string, id idFlag, hist bool) int {
 	}
 	if cid == "" {
 		p := statusPayload{OK: true, Command: cmd, Next: []string{"创建变更"}, Workspace: workspaceViewOf(root)}
+		p.PlanView = describePlan(root, nil, proj, Fingerprint{})
 		if a.json {
 			return a.emit(ExitOK, p)
 		}
 		writeHuman(a.out, p)
 		return ExitOK
 	}
-	var payload statusPayload
-	err = WithChange(root, cid, func(ch *Change) error {
-		ch.syncCatalog(proj)
-		fp := fingerprint(root, ch.projectView(proj))
-		payload = a.payload(root, cmd, ch, proj, fp)
-		if hist {
-			payload.History = ch.History
-		}
-		return nil
-	})
+	ch, err := readChange(root, cid)
 	if err != nil {
 		return a.fail(ExitUsage, err.Error())
+	}
+	if ch == nil {
+		return a.fail(ExitUsage, "找不到变更")
+	}
+	fp := fingerprint(root, ch.projectView(proj))
+	payload := a.payload(root, cmd, ch, proj, fp)
+	if hist {
+		payload.History = ch.History
 	}
 	if a.json {
 		return a.emit(ExitOK, payload)
@@ -1457,6 +1467,7 @@ type statusPayload struct {
 	Next            []string       `json:"next,omitempty"`
 	PlanPending     *PlanProposal  `json:"plan_pending,omitempty"`
 	Workspace       *workspaceView `json:"workspace,omitempty"`
+	PlanView        *planView      `json:"plan_view,omitempty"`
 	History         []Event        `json:"history,omitempty"`
 	Trust           string         `json:"trust,omitempty"`
 }
@@ -1468,6 +1479,7 @@ func (a *app) payload(root, cmd string, ch *Change, proj Project, fp Fingerprint
 		Next: nextActions(root, ch, proj, fp, libsFor(root, ch)), PlanPending: ch.PlanPending,
 		Trust:     "本地状态文件可以被改写。这个 CLI 不认证人类，也不能防止恶意篡改。合并是否可信看仓库 CI 重跑；交付是否接受看来源被明确记下的接受记录。不会自动 merge、push、部署或通知。",
 		Workspace: workspaceViewOf(root),
+		PlanView:  describePlan(root, ch, proj, fp),
 	}
 	if ch.Block != nil && ch.Status == StatusBlocked {
 		p.Block = ch.Block.Reason
@@ -1595,9 +1607,137 @@ func workspaceViewOf(root string) *workspaceView {
 	}
 }
 
+type planView struct {
+	Source string          `json:"source"`
+	Checks []planCheckView `json:"checks,omitempty"`
+}
+
+type planCheckView struct {
+	Name         string   `json:"name"`
+	Argv         []string `json:"argv,omitempty"`
+	Resolved     string   `json:"resolved,omitempty"`
+	Resources    []string `json:"resources,omitempty"`
+	SkipReason   string   `json:"skip_reason,omitempty"`
+	Evidence     string   `json:"evidence,omitempty"`
+	EvidenceNote string   `json:"evidence_note,omitempty"`
+	ProjectArgv  []string `json:"project_argv,omitempty"`
+}
+
+func describePlan(root string, ch *Change, proj Project, fp Fingerprint) *planView {
+	resourceDir := root
+	if lay, _, err := locate(root); err == nil && lay.ResourceDir != "" {
+		resourceDir = lay.ResourceDir
+	}
+	view := &planView{Source: "live"}
+	var active []CheckSpec
+	if ch != nil && ch.Plan != nil {
+		view.Source = "frozen"
+		active = ch.Plan.Checks
+		for _, sk := range ch.Plan.Skips {
+			view.Checks = append(view.Checks, planCheckView{Name: sk.Name, SkipReason: sk.Reason, Evidence: "skipped"})
+		}
+	} else {
+		active = proj.Checks
+	}
+	live := map[string]CheckSpec{}
+	for _, spec := range proj.Checks {
+		live[spec.Name] = spec
+	}
+	for _, spec := range active {
+		item := planCheckView{Name: spec.Name, Argv: redactArgs(spec.Argv), Resources: spec.Resources}
+		if exe, _, _, _, _, err := resolveCheckCommand(root, resourceDir, spec.Argv); err == nil {
+			item.Resolved = redact(exe)
+		} else {
+			item.EvidenceNote = err.Error()
+		}
+		if lp, ok := live[spec.Name]; ok && !sameStrings(lp.Argv, spec.Argv) {
+			item.ProjectArgv = redactArgs(lp.Argv)
+		}
+		if ch != nil {
+			ev, note := planCheckEvidence(ch, spec, proj, fp)
+			item.Evidence = ev
+			if note != "" {
+				item.EvidenceNote = note
+			}
+		}
+		view.Checks = append(view.Checks, item)
+	}
+	return view
+}
+
+func planCheckEvidence(ch *Change, spec CheckSpec, proj Project, fp Fingerprint) (string, string) {
+	_, why := ch.satisfying(spec, proj, fp)
+	var latest *CheckRun
+	for i := range ch.Runs {
+		r := &ch.Runs[i]
+		if r.Name != spec.Name || !envAccepted(spec, proj, r.Environment) {
+			continue
+		}
+		if latest == nil || r.Ended.After(latest.Ended) {
+			latest = r
+		}
+	}
+	if why == "" {
+		return "pass", ""
+	}
+	if latest == nil {
+		return "missing", why
+	}
+	eff := ch.effective(*latest, fp)
+	if eff == "" || eff == "pass" {
+		eff = "stale"
+	}
+	return eff, why
+}
+
+func redactArgs(argv []string) []string {
+	if len(argv) == 0 {
+		return nil
+	}
+	out := make([]string, len(argv))
+	for i, arg := range argv {
+		out[i] = redact(arg)
+	}
+	return out
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func writeHuman(w io.Writer, p statusPayload) {
 	if p.Workspace != nil {
 		fmt.Fprintf(w, "工作区: %s\n配置来源: %s (%s)\n运行状态: %s\n", p.Workspace.Worktree, p.Workspace.ConfigPath, p.Workspace.ConfigMode, p.Workspace.Runtime)
+		if p.Workspace.ConfigMode == modeShared && p.Workspace.Entry == "" {
+			fmt.Fprintln(w, "本地入口: 还没有。可以执行 lauren init-worktree")
+		}
+	}
+	if p.PlanView != nil {
+		fmt.Fprintf(w, "计划来源: %s\n", p.PlanView.Source)
+		for _, c := range p.PlanView.Checks {
+			if c.SkipReason != "" {
+				fmt.Fprintf(w, "  %s 已排除：%s\n", c.Name, c.SkipReason)
+				continue
+			}
+			fmt.Fprintf(w, "  %s %s\n", c.Name, strings.Join(c.Argv, " "))
+			if c.EvidenceNote != "" {
+				fmt.Fprintf(w, "    %s\n", c.EvidenceNote)
+			}
+			if len(c.ProjectArgv) > 0 {
+				fmt.Fprintf(w, "    当前共享配置是 %s，没有自动升级\n", strings.Join(c.ProjectArgv, " "))
+			}
+		}
+	}
+	if p.PlanPending != nil {
+		fmt.Fprintln(w, "待确认计划变更: 需要所有者执行 change plan confirm --owner-confirmed")
 	}
 	if p.ID == "" {
 		fmt.Fprintln(w, "这个工作区没有进行中的变更")

@@ -124,6 +124,13 @@ func runCheck(root, changeID string, proj Project, spec CheckSpec, fp Fingerprin
 		run.Note = fmt.Sprintf("检查超时（%d秒）", secs)
 		return run
 	}
+	if ee, ok := err.(*exec.ExitError); ok {
+		code := ee.ExitCode()
+		run.ExitCode = &code
+	} else if err == nil {
+		code := 0
+		run.ExitCode = &code
+	}
 	if after, aerr := stampResources(files); aerr != nil {
 		run.Status = "fail"
 		run.Note = "执行期间资源变了：" + aerr.Error()
@@ -135,8 +142,6 @@ func runCheck(root, changeID string, proj Project, spec CheckSpec, fp Fingerprin
 	}
 	if err == nil {
 		run.Status = "pass"
-		code := 0
-		run.ExitCode = &code
 		if why := executedGap(spec, run); why != "" {
 			run.Status = "fail"
 			run.Note = why
