@@ -343,6 +343,69 @@ func TestSharedConfigKeepsFrozenPlan(t *testing.T) {
 	}
 }
 
+func TestLegacyOutsideGitWalksUp(t *testing.T) {
+	dir := t.TempDir()
+	must(t, dir, ExitOK, "init", "--integration-branch", "main")
+	sub := filepath.Join(dir, "a", "b")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st := must(t, sub, ExitOK, "status")
+	ws := workspace(t, st)
+	if ws["config_mode"] != "legacy" || canonPath(t, ws["worktree"].(string)) != canonPath(t, dir) {
+		t.Fatalf("不在 git 里时，子目录应向上找到旧配置: %#v", ws)
+	}
+
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(repo, "lauren.project.json"), strings.Replace(sharedBody, `"name": "unit"`, `"name": "outer-only"`, 1))
+	writeFile(t, filepath.Join(repo, "README"), "outer\n")
+	gitInit(t, repo)
+	ceiling := filepath.Join(repo, "ceiling")
+	loose := filepath.Join(ceiling, "a")
+	if err := os.MkdirAll(loose, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CEILING_DIRECTORIES", ceiling)
+	_, m, errb := runAt(t, loose, "status")
+	text := errText(m, errb)
+	if strings.Contains(text, "outer-only") || !strings.Contains(text, "Git 仓库边界") {
+		t.Fatalf("向上查找不能越过 Git 仓库: %s", text)
+	}
+}
+
+func TestDiagnosticWording(t *testing.T) {
+	t.Run("configBelowWorktreeRoot", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "README"), "g\n")
+		gitInit(t, dir)
+		svc := filepath.Join(dir, "svc")
+		if err := os.MkdirAll(svc, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		must(t, svc, ExitOK, "init", "--integration-branch", "main")
+		_, m, errb := runAt(t, svc, "status")
+		text := errText(m, errb)
+		if !strings.Contains(text, "不在 worktree 根") || !strings.Contains(text, filepath.Join("svc", "lauren.project.json")) || strings.Contains(text, "未初始化") {
+			t.Fatalf("子目录里的配置应指出路径，而不是说未初始化: %s", text)
+		}
+	})
+
+	t.Run("movedSharedConfig", func(t *testing.T) {
+		main, _, b := setupSharedRepo(t)
+		if err := os.Rename(filepath.Join(main, ".lauren", "project"), filepath.Join(main, ".lauren", "project-old")); err != nil {
+			t.Fatal(err)
+		}
+		_, m, errb := runAt(t, b, "status")
+		text := errText(m, errb)
+		if !strings.Contains(text, "没有 .lauren/project/lauren.project.json") || !strings.Contains(text, main) {
+			t.Fatalf("共享配置被挪走时应指出主工作区: %s", text)
+		}
+	})
+}
+
 func TestPathAlias(t *testing.T) {
 	realBase := filepath.Join(t.TempDir(), "真实 路径")
 	main := filepath.Join(realBase, "main")

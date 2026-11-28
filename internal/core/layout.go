@@ -121,27 +121,48 @@ func locate(start string) (Layout, Project, error) {
 	if gitErr != nil {
 		return locateWithoutGit(abs)
 	}
-	return locateInWorktree(top)
+	return locateInWorktree(abs, top)
+}
+
+func hasGitDir(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, ".git"))
+	return err == nil
 }
 
 func locateWithoutGit(start string) (Layout, Project, error) {
-	entry := filepath.Join(start, "lauren.project.json")
-	fi, err := os.Lstat(entry)
-	if err != nil {
-		return Layout{}, Project{}, fmt.Errorf("未初始化：当前目录不是 git 工作区，也没有 lauren 配置")
+	dir := start
+	for {
+		entry := filepath.Join(dir, "lauren.project.json")
+		fi, err := os.Lstat(entry)
+		if err == nil {
+			if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+				return Layout{}, Project{}, fmt.Errorf("未初始化：当前目录不是 git 工作区，不能解析共享配置引用")
+			}
+			proj, rerr := readProjectFile(entry)
+			if rerr != nil {
+				return Layout{}, Project{}, rerr
+			}
+			root := dir
+			if c, cerr := canonical(dir); cerr == nil {
+				root = c
+			}
+			return layoutFor(root, entry, modeLegacy, "", ""), proj, nil
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return Layout{}, Project{}, err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return Layout{}, Project{}, fmt.Errorf("未初始化：当前目录不是 git 工作区，也没有 lauren 配置")
+		}
+		if hasGitDir(parent) {
+			return Layout{}, Project{}, fmt.Errorf("未初始化：当前目录不是 git 工作区，向上遇到 Git 仓库边界，没有 lauren 配置")
+		}
+		dir = parent
 	}
-	if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
-		return Layout{}, Project{}, fmt.Errorf("未初始化：当前目录不是 git 工作区，不能解析共享配置引用")
-	}
-	proj, err := readProjectFile(entry)
-	if err != nil {
-		return Layout{}, Project{}, err
-	}
-	lay := layoutFor(start, entry, modeLegacy, "", "")
-	return lay, proj, nil
 }
 
-func locateInWorktree(top string) (Layout, Project, error) {
+func locateInWorktree(start, top string) (Layout, Project, error) {
 	main, mainErr := mainCheckout(top)
 	entryPath := filepath.Join(top, "lauren.project.json")
 	fi, err := os.Lstat(entryPath)
@@ -189,7 +210,50 @@ func locateInWorktree(top string) (Layout, Project, error) {
 			return Layout{}, Project{}, fmt.Errorf("未初始化：当前 Worktree 没有配置入口。主工作区仍是旧的单层 lauren.project.json，没有 .lauren/project/。请显式写 shared_config，不要把主工作区当成这个 Worktree 的运行根")
 		}
 	}
+	if nested, ok := configAboveWorktreeRoot(start, top); ok {
+		return Layout{}, Project{}, fmt.Errorf("发现了 %s，但它不在 worktree 根 %s", nested, top)
+	}
+	if note := missingSharedConfig(main); note != "" {
+		return Layout{}, Project{}, fmt.Errorf("%s", note)
+	}
 	return Layout{}, Project{}, fmt.Errorf("未初始化：当前 Worktree 没有 lauren 配置")
+}
+
+func configAboveWorktreeRoot(start, top string) (string, bool) {
+	dir := start
+	if c, err := canonical(start); err == nil {
+		dir = c
+	}
+	for {
+		if samePath(dir, top) {
+			return "", false
+		}
+		entry := filepath.Join(dir, "lauren.project.json")
+		if _, err := os.Lstat(entry); err == nil {
+			return entry, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+func missingSharedConfig(main string) string {
+	if main == "" {
+		return ""
+	}
+	lauren := filepath.Join(main, ".lauren")
+	st, err := os.Stat(lauren)
+	if err != nil || !st.IsDir() {
+		return ""
+	}
+	shared := filepath.Join(lauren, "project", "lauren.project.json")
+	if _, err := os.Stat(shared); err == nil {
+		return ""
+	}
+	return fmt.Sprintf("主工作区 %s 下没有 .lauren/project/lauren.project.json", main)
 }
 
 func sharedFile(top, main string, mainErr error) (string, error) {
