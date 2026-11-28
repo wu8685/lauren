@@ -83,12 +83,18 @@ func (c *Change) effective(run CheckRun, fp Fingerprint) string {
 		if run.EvidenceGeneration != c.EvidenceGeneration {
 			return "stale"
 		}
+		if resourceDriftReason(run) != "" {
+			return "stale"
+		}
 		return run.Status
 	}
 	if run.CandidateKind != "ok" {
 		return "blocked"
 	}
 	if run.EvidenceGeneration != c.EvidenceGeneration || fp.Kind != "ok" || run.Fingerprint != fp.Hash {
+		return "stale"
+	}
+	if resourceDriftReason(run) != "" {
 		return "stale"
 	}
 	return run.Status
@@ -111,17 +117,24 @@ func envAccepted(spec CheckSpec, proj Project, env string) bool {
 func (c *Change) satisfying(spec CheckSpec, proj Project, fp Fingerprint) (*CheckRun, string) {
 	// 每个被接受的环境只看自己仍适用的最新一条。另一个环境或另一项检查的结果不覆盖它。
 	latest := map[string]int{}
+	var drifted []string
 	for i := range c.Runs {
 		r := &c.Runs[i]
 		if r.Name != spec.Name || !envAccepted(spec, proj, r.Environment) {
 			continue
 		}
 		if c.effective(*r, fp) == "stale" {
+			if why := resourceDriftReason(*r); why != "" {
+				drifted = append(drifted, why)
+			}
 			continue
 		}
 		latest[r.Environment] = i
 	}
 	if len(latest) == 0 {
+		if len(drifted) > 0 {
+			return nil, spec.Name + " 的" + drifted[len(drifted)-1]
+		}
 		return nil, spec.Name + " 没有仍有效、且环境被接受的通过记录"
 	}
 	envs := make([]string, 0, len(latest))
@@ -140,7 +153,11 @@ func (c *Change) satisfying(spec CheckSpec, proj Project, fp Fingerprint) (*Chec
 			}
 			continue
 		}
-		bad = append(bad, fmt.Sprintf("%s 在 %s 的最新结果是 %s，不能沿用更早的通过", spec.Name, env, eff))
+		msg := fmt.Sprintf("%s 在 %s 的最新结果是 %s，不能沿用更早的通过", spec.Name, env, eff)
+		if strings.Contains(r.Note, "资源") {
+			msg += "：" + r.Note
+		}
+		bad = append(bad, msg)
 	}
 	if pass != nil {
 		return pass, ""

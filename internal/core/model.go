@@ -83,6 +83,7 @@ type CheckSpec struct {
 	Environments    []string `json:"environments,omitempty"`
 	TimeoutSeconds  int64    `json:"timeout_seconds,omitempty"`
 	RequireExecuted bool     `json:"require_executed,omitempty"`
+	Resources       []string `json:"resources,omitempty"`
 }
 
 type Requirement struct {
@@ -158,32 +159,36 @@ type ArtifactRev struct {
 }
 
 type CheckRun struct {
-	ID                 string    `json:"id"`
-	Name               string    `json:"name"`
-	Layer              string    `json:"layer"`
-	Gate               string    `json:"gate"`
-	Argv               []string  `json:"argv"`
-	Cwd                string    `json:"cwd"`
-	Environment        string    `json:"environment"`
-	ExitCode           *int      `json:"exit_code"`
-	Status             string    `json:"status"`
-	Started            time.Time `json:"started"`
-	Ended              time.Time `json:"ended"`
-	LogPath            string    `json:"log_path,omitempty"`
-	LogBytes           int       `json:"log_bytes"`
-	Preview            string    `json:"preview,omitempty"`
-	Fingerprint        string    `json:"fingerprint,omitempty"`
-	EvidenceGeneration int       `json:"evidence_generation"`
-	BindKind           string    `json:"bind_kind"`
-	IntegrationBranch  string    `json:"integration_branch,omitempty"`
-	IntegrationSHA     string    `json:"integration_sha,omitempty"`
-	CandidateKind      string    `json:"candidate_kind"`
-	Note               string    `json:"note,omitempty"`
-	TimeoutSeconds     int64     `json:"timeout_seconds,omitempty"`
-	Classification     string    `json:"classification,omitempty"`
-	LogDigest          string    `json:"log_digest,omitempty"`
-	Executed           *int      `json:"executed,omitempty"`
-	Skipped            *int      `json:"skipped,omitempty"`
+	ID                 string          `json:"id"`
+	Name               string          `json:"name"`
+	Layer              string          `json:"layer"`
+	Gate               string          `json:"gate"`
+	Argv               []string        `json:"argv"`
+	Cwd                string          `json:"cwd"`
+	Environment        string          `json:"environment"`
+	ExitCode           *int            `json:"exit_code"`
+	Status             string          `json:"status"`
+	Started            time.Time       `json:"started"`
+	Ended              time.Time       `json:"ended"`
+	LogPath            string          `json:"log_path,omitempty"`
+	LogBytes           int             `json:"log_bytes"`
+	Preview            string          `json:"preview,omitempty"`
+	Fingerprint        string          `json:"fingerprint,omitempty"`
+	EvidenceGeneration int             `json:"evidence_generation"`
+	BindKind           string          `json:"bind_kind"`
+	IntegrationBranch  string          `json:"integration_branch,omitempty"`
+	IntegrationSHA     string          `json:"integration_sha,omitempty"`
+	CandidateKind      string          `json:"candidate_kind"`
+	Note               string          `json:"note,omitempty"`
+	TimeoutSeconds     int64           `json:"timeout_seconds,omitempty"`
+	Classification     string          `json:"classification,omitempty"`
+	LogDigest          string          `json:"log_digest,omitempty"`
+	Executed           *int            `json:"executed,omitempty"`
+	Skipped            *int            `json:"skipped,omitempty"`
+	ResourceStamps     []ResourceStamp `json:"resource_stamps,omitempty"`
+	ResourceDigest     string          `json:"resource_digest,omitempty"`
+	ResourceNote       string          `json:"resource_note,omitempty"`
+	ToolPath           string          `json:"tool_path,omitempty"`
 }
 
 type RedSkip struct {

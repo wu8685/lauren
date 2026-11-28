@@ -58,21 +58,44 @@ func runCheck(root, changeID string, proj Project, spec CheckSpec, fp Fingerprin
 			return run
 		}
 	}
-	if len(spec.Argv) == 0 || strings.Contains(spec.Argv[0], "..") {
+	resourceDir := root
+	if lay, _, lerr := locate(root); lerr == nil && lay.ResourceDir != "" {
+		resourceDir = lay.ResourceDir
+	}
+	exe, args, files, toolPath, toolNote, rerr := resolveCheckCommand(root, resourceDir, spec.Argv)
+	if rerr != nil {
 		run.Status = "fail"
-		run.Note = "检查命令为空或路径越界"
+		run.Note = rerr.Error()
 		run.Ended = time.Now().UTC()
 		return run
 	}
+	more, ferr := resourceFiles(root, resourceDir, spec, "")
+	if ferr != nil {
+		run.Status = "fail"
+		run.Note = ferr.Error()
+		run.Ended = time.Now().UTC()
+		return run
+	}
+	files = append(files, more...)
+	before, serr := stampResources(files)
+	if serr != nil {
+		run.Status = "fail"
+		run.Note = serr.Error()
+		run.Ended = time.Now().UTC()
+		return run
+	}
+	run.ResourceStamps = before
+	run.ResourceDigest = digestStamps(before)
+	run.ResourceNote = toolNote
+	run.ToolPath = toolPath
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(secs)*checkTimeoutUnit)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, spec.Argv[0], spec.Argv[1:]...)
+	cmd := exec.CommandContext(ctx, exe, args[1:]...)
 	configureCheckProcess(cmd)
 	cmd.Dir = root
-	if strings.Contains(spec.Argv[0], "/") && !filepath.IsAbs(spec.Argv[0]) {
-		cmd.Path = filepath.Join(root, spec.Argv[0])
-		cmd.Args[0] = cmd.Path
-	}
+	cmd.Path = exe
+	cmd.Args = args
+	cmd.Env = append(os.Environ(), "LAUREN_WORKTREE="+root, "LAUREN_RESOURCE="+resourceDir)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
@@ -99,6 +122,15 @@ func runCheck(root, changeID string, proj Project, spec CheckSpec, fp Fingerprin
 	if ctx.Err() == context.DeadlineExceeded {
 		run.Status = "fail"
 		run.Note = fmt.Sprintf("检查超时（%d秒）", secs)
+		return run
+	}
+	if after, aerr := stampResources(files); aerr != nil {
+		run.Status = "fail"
+		run.Note = "执行期间资源变了：" + aerr.Error()
+		return run
+	} else if why := stampsDiffer(before, after); why != "" {
+		run.Status = "fail"
+		run.Note = why
 		return run
 	}
 	if err == nil {
